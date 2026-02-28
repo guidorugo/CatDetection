@@ -13,14 +13,17 @@ def setup_logging() -> None:
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
+    handler.setLevel(level)
 
     root = logging.getLogger()
+    root.handlers.clear()
     root.setLevel(level)
     root.addHandler(handler)
 
-    # Quiet noisy loggers
+    # Quiet noisy loggers even in debug mode
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("multipart").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:
