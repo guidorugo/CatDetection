@@ -56,8 +56,26 @@
 - `POST /api/v1/training/reload-model` hot-swaps the identifier model without restarting the app
 - `POST /api/v1/training/jobs/{id}/cancel` cancels a running/pending training job
 - Training UI shows a live progress bar with auto-polling every 5s
+- On startup, orphaned remote training jobs (stuck as "running" after a restart) are automatically resumed — polling continues, model is downloaded and hot-reloaded on completion. Orphaned local jobs are marked as failed.
 - SQLite stays on Jetson only; the server never touches the database
 - `scripts/sync_and_train.sh` is deprecated (kept for reference)
+
+## Test Page
+
+- `POST /api/v1/test/detect` — upload a photo, detect cats (YOLO) + identify each (ResNet Re-ID + embedding matching), returns JSON with bounding boxes, confidence, cat names, and similarity scores
+- Handles multiple cats per image; each detection is independently identified
+- UI at `/test` draws bounding boxes on a canvas with color-coded labels
+
+## Model Management
+
+- `GET /api/v1/models` — list all registered model versions with metrics and active status
+- `POST /api/v1/models/{version}/activate` — activate a model version and hot-reload it into the pipeline (rebuilds embedding store)
+- Training page includes a "Models" section showing all versions with an "Activate" button
+
+## API Pagination
+
+- `GET /api/v1/events` and `GET /api/v1/training/jobs` return paginated responses: `{items, total, limit, offset}`
+- Events default 50 per page, training jobs default 10 per page
 
 ## Environment Variables
 
