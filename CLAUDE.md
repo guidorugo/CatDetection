@@ -44,16 +44,17 @@
 - `bcrypt` pinned to `<5.0.0` for passlib compatibility
 - ML imports in `app/main.py` are lazy (inside lifespan) to allow API-only mode when torch is unavailable
 
-## Two-Machine Training
+## Remote Training (Client-Server)
 
-- Train on a server with a bigger GPU, run inference on the Jetson
+- Server runs `scripts/training_server.py` (standalone FastAPI daemon, no `app.*` imports)
+- Jetson runs `scripts/training_client.sh` to push data, trigger training, poll, and pull the model
+- Server handles both `prepare_data.py` (YOLO cropping) and `train_identifier.py` as subprocesses
+- Auth via `X-API-Key` header (shared `TRAINING_API_KEY` env var)
 - PyTorch `.pth` files are portable between x86_64 ↔ ARM64 (`map_location=device`)
 - TensorRT `.engine` files are NOT portable (device-specific), but the app falls back to `.pth`
-- `scripts/sync_and_train.sh` runs on the server: rsync data → train → rsync model → reload
 - `POST /api/v1/training/reload-model` hot-swaps the identifier model without restarting the app
 - SQLite stays on Jetson only; the server never touches the database
-- `scripts/prepare_data.py` must run on the Jetson (needs YOLO + raw images)
-- `scripts/train_identifier.py` runs unmodified on the server
+- `scripts/sync_and_train.sh` is deprecated (kept for reference)
 
 ## Environment Variables
 

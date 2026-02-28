@@ -59,9 +59,27 @@ python scripts/train_identifier.py --epochs 50
 python scripts/export_model.py models/identification/cat_reid_*.pth
 ```
 
-## Two-Machine Training (Server + Jetson)
+## Remote Training (Server + Jetson)
 
-If you have a separate server with a more powerful GPU (e.g., RTX 2080Ti), you can train on the server while the Jetson keeps running detection. PyTorch `.pth` models are portable between x86_64 and ARM64.
+Train on a server with a more powerful GPU (e.g., RTX 2080Ti) while the Jetson keeps running detection. The server runs a persistent training daemon; the Jetson pushes raw images, triggers training (including YOLO data prep), polls progress, and pulls the model back.
+
+```
+Jetson (Client)                          Server (GPU)
++-----------------------+                +---------------------------+
+| CatDetect app :8000   |                | training_server.py :8001  |
+|                       |   rsync        |                           |
+| data/{cat_name}/*.jpg | ============> | data/{cat_name}/*.jpg     |
+|                       |                |                           |
+| training_client.sh    | -- POST -----> | /prepare-and-train        |
+|                       |                |   → prepare_data.py       |
+|                       | -- GET ------> | /status (poll progress)   |
+|                       |                |   → train_identifier.py   |
+|                       | <-- GET ------ | /model/latest (.pth)      |
+|                       | <-- GET ------ | /model/registry (.json)   |
+|                       |                |                           |
+| POST /reload-model    |                +---------------------------+
++-----------------------+
+```
 
 ### Server Setup (one-time)
 
@@ -70,30 +88,57 @@ If you have a separate server with a more powerful GPU (e.g., RTX 2080Ti), you c
 git clone <repo-url> && cd cat-detection-project
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# Set up SSH key auth to Jetson
-ssh-copy-id user@jetson-ip
 ```
 
-### Workflow
+Start the training daemon:
 
 ```bash
-# On the Jetson: prepare training data (YOLO crops raw images)
-python scripts/prepare_data.py --data-dir data --output-dir data/processed
-
-# On the server: sync data, train, deploy
-export JETSON_HOST=user@jetson-ip
-export AUTH_TOKEN=<your-jwt-token>
-./scripts/sync_and_train.sh
+TRAINING_API_KEY=your-secret python scripts/training_server.py
 ```
 
-The script:
-1. Pulls `data/processed/` from Jetson (cropped 256x256 JPEGs, not raw images)
-2. Trains the model on the server GPU
-3. Pushes the model + registry back to Jetson
-4. Calls `POST /api/v1/training/reload-model` to hot-swap the model
+Optional systemd service (`/etc/systemd/system/catdetect-training.service`):
 
-Detection continues running on the Jetson throughout. The reload pauses the pipeline for ~2 seconds while loading the new `.pth` file.
+```ini
+[Unit]
+Description=CatDetect Training Server
+After=network.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/path/to/cat-detection-project
+Environment=TRAINING_API_KEY=your-secret
+ExecStart=/path/to/cat-detection-project/venv/bin/python scripts/training_server.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Training from the Jetson
+
+```bash
+# Set up SSH key auth to the server (for rsync)
+ssh-copy-id user@server-ip
+
+# Set environment variables
+export TRAINING_SERVER_HOST=192.168.1.200
+export TRAINING_SERVER_SSH=user@192.168.1.200
+export TRAINING_API_KEY=your-secret
+export CATDETECT_TOKEN=your-jwt-token
+
+# Run training (default 50 epochs)
+./scripts/training_client.sh --epochs 50
+```
+
+The client script:
+1. Rsyncs raw `data/` (excluding `processed/`) to the server
+2. Triggers `/prepare-and-train` (server runs YOLO cropping + model training)
+3. Polls `/status` every 30s showing progress
+4. Downloads the trained `.pth` model and registry
+5. Calls `POST /api/v1/training/reload-model` to hot-swap the model
+
+Detection continues running on the Jetson throughout. PyTorch `.pth` models are portable between x86_64 and ARM64.
 
 ## Architecture
 

@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
-# sync_and_train.sh — Run on the SERVER to train a cat re-ID model using Jetson data.
+# ============================================================================
+# DEPRECATED — Use the new client-server training architecture instead:
+#
+#   Server:  TRAINING_API_KEY=secret python scripts/training_server.py
+#   Jetson:  ./scripts/training_client.sh --epochs 50
+#
+# The new approach runs a persistent daemon on the server and lets the Jetson
+# push data, trigger training (including YOLO data prep), poll progress, and
+# pull the model back — all automated. See README.md for details.
+# ============================================================================
+#
+# sync_and_train.sh — (Legacy) Run on the SERVER to train a cat re-ID model.
 #
 # Workflow:
 #   1. rsync processed training data from Jetson → server
