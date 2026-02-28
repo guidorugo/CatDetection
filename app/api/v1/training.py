@@ -53,6 +53,224 @@ async def _reload_model_after_training(app, model_path: str):
                     embedding_store.cat_count, embedding_store.total_embeddings)
 
 
+async def _resume_remote_training_job(job_id: int, job_config: dict, app) -> None:
+    """Resume polling a remote training job after a restart.
+
+    Skips rsync and trigger (already done), jumps straight to polling.
+    """
+    import re
+
+    import httpx
+
+    pipeline = getattr(app.state, "detection_pipeline", None)
+
+    server_ssh = job_config.get("server_ssh") or settings.TRAINING_SERVER_SSH
+    server_port = job_config.get("server_port") or settings.TRAINING_SERVER_PORT
+    api_key = job_config.get("api_key") or settings.TRAINING_API_KEY
+    base_url = f"http://{server_ssh.split('@')[-1]}:{server_port}"
+
+    logger.info("Resuming polling for remote training job %d at %s", job_id, base_url)
+
+    step = f"polling {base_url}/status"
+    try:
+        # Poll status until complete/error/cancelled
+        poll_failures = 0
+        while True:
+            await asyncio.sleep(10)
+
+            # Check if job was cancelled locally
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == job_id)
+                )
+                job = result.scalar_one()
+                if job.status == "cancelled":
+                    logger.info("Resumed remote job %d cancelled locally", job_id)
+                    try:
+                        async with httpx.AsyncClient(timeout=10) as client:
+                            await client.post(
+                                f"{base_url}/cancel",
+                                headers={"X-API-Key": api_key},
+                            )
+                    except Exception:
+                        pass
+                    return
+
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        f"{base_url}/status",
+                        headers={"X-API-Key": api_key},
+                    )
+                    resp.raise_for_status()
+                    remote_status = resp.json()
+                poll_failures = 0
+            except (httpx.ConnectError, httpx.TimeoutException) as poll_err:
+                poll_failures += 1
+                logger.warning("Resume poll failed (%d/3): %s: %s",
+                               poll_failures, type(poll_err).__name__, poll_err)
+                if poll_failures >= 3:
+                    raise RuntimeError(
+                        f"Lost connection to training server at {base_url} "
+                        f"({poll_failures} consecutive poll failures)"
+                    )
+                continue
+
+            rs = remote_status["status"]
+            progress_str = remote_status.get("progress")
+
+            epochs_done = 0
+            if progress_str:
+                m = re.match(r"(\d+)/(\d+)", progress_str)
+                if m:
+                    epochs_done = int(m.group(1))
+
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == job_id)
+                )
+                job = result.scalar_one()
+                job.epochs_completed = epochs_done
+                await db.commit()
+
+            if rs == "complete":
+                logger.info("Resumed remote job %d: training complete", job_id)
+                break
+            elif rs == "cancelled":
+                logger.info("Resumed remote job %d: cancelled by server", job_id)
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(TrainingJob).where(TrainingJob.id == job_id)
+                    )
+                    job = result.scalar_one()
+                    job.status = "cancelled"
+                    await db.commit()
+                return
+            elif rs == "error":
+                raise RuntimeError(f"Remote training failed: {remote_status.get('error')}")
+            elif rs == "idle":
+                # Server finished and reset — model may still be downloadable
+                logger.info("Resumed remote job %d: server is idle (training already finished)", job_id)
+                break
+
+        # Download model and registry
+        step = f"downloading model from {base_url}/model/latest"
+        logger.info("Resume step: %s", step)
+        save_dir = Path(settings.MODELS_DIR) / "identification"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.get(
+                    f"{base_url}/model/latest",
+                    headers={"X-API-Key": api_key},
+                )
+                resp.raise_for_status()
+                filename = "cat_reid_remote.pth"
+                cd = resp.headers.get("content-disposition", "")
+                if "filename=" in cd:
+                    filename = cd.split("filename=")[-1].strip('" ')
+                model_path = str(save_dir / filename)
+                Path(model_path).write_bytes(resp.content)
+                logger.info("Downloaded model to %s", model_path)
+
+                step = f"downloading registry from {base_url}/model/registry"
+                resp = await client.get(
+                    f"{base_url}/model/registry",
+                    headers={"X-API-Key": api_key},
+                )
+                resp.raise_for_status()
+                remote_registry = resp.json()
+        except httpx.ConnectError:
+            raise RuntimeError(f"Cannot connect to training server at {base_url} during model download")
+        except httpx.TimeoutException:
+            raise RuntimeError(f"Timeout downloading model from {base_url}")
+
+        step = "registering model"
+        from app.ml.model_registry import ModelRegistry
+
+        registry = ModelRegistry()
+        version = remote_status.get("model_version")
+        if version and version in remote_registry.get("models", {}):
+            registry.register_model(
+                version=version,
+                path=model_path,
+                metrics=remote_registry["models"][version].get("metrics", {}),
+            )
+            registry.activate_model(version)
+            logger.info("Registered remote model version %s", version)
+
+        epochs_total = job_config.get("epochs", 0)
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "completed"
+            job.model_version = version
+            job.model_path = model_path
+            job.epochs_completed = epochs_total
+            await db.commit()
+
+        step = "reloading model"
+        if pipeline:
+            pipeline.pause()
+            try:
+                await _reload_model_after_training(app, model_path)
+            finally:
+                pipeline.resume()
+
+        logger.info("Resumed remote training job %d completed successfully", job_id)
+
+    except Exception as e:
+        logger.error("Resumed remote training job %d failed at step '%s': %s: %s",
+                     job_id, step, type(e).__name__, e)
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "failed"
+            job.error_message = f"[resume: {step}] {e}"
+            await db.commit()
+
+
+async def resume_orphaned_jobs(app) -> None:
+    """On startup, find stuck running/pending jobs and resume or fail them."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(TrainingJob).where(TrainingJob.status.in_(["running", "pending"]))
+        )
+        orphaned_jobs = result.scalars().all()
+
+    for job in orphaned_jobs:
+        config = json.loads(job.config) if job.config else {}
+        is_remote = config.get("training_location") == "remote"
+
+        if is_remote:
+            server_ssh = config.get("server_ssh") or settings.TRAINING_SERVER_SSH
+            api_key = config.get("api_key") or settings.TRAINING_API_KEY
+            if server_ssh and api_key:
+                logger.info("Resuming orphaned remote training job %d", job.id)
+                asyncio.create_task(_resume_remote_training_job(job.id, config, app))
+            else:
+                logger.warning("Cannot resume remote job %d: missing server config", job.id)
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(TrainingJob).where(TrainingJob.id == job.id)
+                    )
+                    j = result.scalar_one()
+                    j.status = "failed"
+                    j.error_message = "Process restarted; missing remote server config for resume"
+                    await db.commit()
+        else:
+            logger.warning("Marking orphaned local training job %d as failed", job.id)
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == job.id)
+                )
+                j = result.scalar_one()
+                j.status = "failed"
+                j.error_message = "Process restarted; local training cannot be resumed"
+                await db.commit()
+
+
 async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> None:
     """Run training on the remote GPU server: rsync → train → download model → reload."""
     import re
