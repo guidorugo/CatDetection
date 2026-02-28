@@ -36,10 +36,35 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             pipeline.pause()
             logger.info("Detection pipeline paused for training")
 
+        # Prepare data (YOLO crop + train/val/test split) if not already done
+        from app.core.config import settings
+
+        data_dir = str(settings.DATA_DIR)
+        processed_dir = str(Path(data_dir) / "processed")
+        train_dir = Path(processed_dir) / "train"
+
+        if not train_dir.exists():
+            logger.info("Preparing training data (YOLO cropping)...")
+            import subprocess
+            import sys
+
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable, "scripts/prepare_data.py",
+                    "--data-dir", data_dir,
+                    "--output-dir", processed_dir,
+                ],
+                capture_output=True, text=True, timeout=1800,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Data preparation failed:\n{result.stderr[-500:]}")
+            logger.info("Data preparation complete")
+
         from app.ml.training.trainer import CatReIDTrainer
 
         trainer = CatReIDTrainer(
-            data_dir="data/processed",
+            data_dir=processed_dir,
             epochs=data.epochs,
             learning_rate=data.learning_rate,
             freeze_epochs=data.freeze_epochs,
