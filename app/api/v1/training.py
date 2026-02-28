@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.config import settings
 from app.core.database import async_session
 from app.core.logging import get_logger
 from app.models.training_job import TrainingJob
@@ -17,6 +18,196 @@ from app.schemas.training import TrainingJobResponse, TrainingStart
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+async def _reload_model_after_training(app, model_path: str):
+    """Reload identifier model and rebuild embedding store."""
+    pipeline = getattr(app.state, "detection_pipeline", None)
+    model_registry = getattr(app.state, "model_registry", None)
+    embedding_store = getattr(app.state, "embedding_store", None)
+    if model_registry and embedding_store and pipeline:
+        from app.ml.identifier import CatIdentifier
+        from app.models.cat import Cat, CatEmbedding
+
+        new_identifier = CatIdentifier()
+        await new_identifier.load(model_path)
+        pipeline._identifier = new_identifier
+
+        embedding_store.clear()
+        async with async_session() as db:
+            cat_result = await db.execute(select(Cat))
+            cats = cat_result.scalars().all()
+            for cat in cats:
+                emb_result = await db.execute(
+                    select(CatEmbedding).where(CatEmbedding.cat_id == cat.id)
+                )
+                cat_embeddings = emb_result.scalars().all()
+                if cat_embeddings:
+                    embeddings = [
+                        np.frombuffer(e.embedding, dtype=np.float32)
+                        for e in cat_embeddings
+                    ]
+                    embedding_store.add_cat(cat.id, cat.name, embeddings)
+
+        logger.info("Model reloaded after training: %d cats, %d embeddings",
+                    embedding_store.cat_count, embedding_store.total_embeddings)
+
+
+async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> None:
+    """Run training on the remote GPU server: rsync → train → download model → reload."""
+    import re
+    import subprocess
+    import sys
+
+    import httpx
+
+    pipeline = getattr(app.state, "detection_pipeline", None)
+
+    server_ssh = settings.TRAINING_SERVER_SSH
+    server_port = settings.TRAINING_SERVER_PORT
+    api_key = settings.TRAINING_API_KEY
+    server_dir = settings.TRAINING_SERVER_DIR
+    base_url = f"http://{server_ssh.split('@')[-1]}:{server_port}"
+
+    # Update job to running
+    async with async_session() as db:
+        result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+        job = result.scalar_one()
+        job.status = "running"
+        await db.commit()
+
+    try:
+        # Step 1: rsync data/ to remote server
+        logger.info("Rsyncing data to %s:%s/data/", server_ssh, server_dir)
+        rsync_result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                "rsync", "-az", "--delete",
+                str(settings.DATA_DIR) + "/",
+                f"{server_ssh}:{server_dir}/data/",
+            ],
+            capture_output=True, text=True, timeout=600,
+        )
+        if rsync_result.returncode != 0:
+            raise RuntimeError(f"rsync failed:\n{rsync_result.stderr[-500:]}")
+        logger.info("Data rsync complete")
+
+        # Step 2: Trigger training on the remote server
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{base_url}/prepare-and-train",
+                params={"epochs": data.epochs},
+                headers={"X-API-Key": api_key},
+            )
+            if resp.status_code == 409:
+                raise RuntimeError("Remote server already has a training job running")
+            resp.raise_for_status()
+        logger.info("Remote training triggered (epochs=%d)", data.epochs)
+
+        # Step 3: Poll status every 10s
+        while True:
+            await asyncio.sleep(10)
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{base_url}/status",
+                    headers={"X-API-Key": api_key},
+                )
+                resp.raise_for_status()
+                remote_status = resp.json()
+
+            rs = remote_status["status"]
+            progress_str = remote_status.get("progress")
+
+            # Parse progress like "12/50 epochs"
+            epochs_done = 0
+            if progress_str:
+                m = re.match(r"(\d+)/(\d+)", progress_str)
+                if m:
+                    epochs_done = int(m.group(1))
+
+            # Update local DB with progress
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == job_id)
+                )
+                job = result.scalar_one()
+                job.epochs_completed = epochs_done
+                await db.commit()
+
+            if rs == "complete":
+                logger.info("Remote training complete")
+                break
+            elif rs == "error":
+                raise RuntimeError(f"Remote training failed: {remote_status.get('error')}")
+
+        # Step 4: Download model and registry from server
+        save_dir = Path(settings.MODELS_DIR) / "identification"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            # Download model file
+            resp = await client.get(
+                f"{base_url}/model/latest",
+                headers={"X-API-Key": api_key},
+            )
+            resp.raise_for_status()
+            # Get filename from content-disposition or use default
+            filename = "cat_reid_remote.pth"
+            cd = resp.headers.get("content-disposition", "")
+            if "filename=" in cd:
+                filename = cd.split("filename=")[-1].strip('" ')
+            model_path = str(save_dir / filename)
+            Path(model_path).write_bytes(resp.content)
+            logger.info("Downloaded model to %s", model_path)
+
+            # Download registry and merge
+            resp = await client.get(
+                f"{base_url}/model/registry",
+                headers={"X-API-Key": api_key},
+            )
+            resp.raise_for_status()
+            remote_registry = resp.json()
+
+        # Fix paths in registry to point to local model
+        from app.ml.model_registry import ModelRegistry
+
+        registry = ModelRegistry()
+        version = remote_status.get("model_version")
+        if version and version in remote_registry.get("models", {}):
+            registry.register_model(
+                version=version,
+                path=model_path,
+                metrics=remote_registry["models"][version].get("metrics", {}),
+            )
+            registry.activate_model(version)
+            logger.info("Registered remote model version %s", version)
+
+        # Update job as completed
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "completed"
+            job.model_version = version
+            job.model_path = model_path
+            job.epochs_completed = data.epochs
+            await db.commit()
+
+        # Reload model
+        if pipeline:
+            pipeline.pause()
+            try:
+                await _reload_model_after_training(app, model_path)
+            finally:
+                pipeline.resume()
+
+    except Exception as e:
+        logger.error("Remote training job %d failed: %s", job_id, e)
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "failed"
+            job.error_message = str(e)
+            await db.commit()
 
 
 async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
@@ -37,8 +228,6 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             logger.info("Detection pipeline paused for training")
 
         # Prepare data (YOLO crop + train/val/test split)
-        from app.core.config import settings
-
         data_dir = str(settings.DATA_DIR)
         processed_dir = str(Path(data_dir) / "processed")
         train_dir = Path(processed_dir) / "train"
@@ -77,6 +266,9 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             freeze_epochs=data.freeze_epochs,
         )
 
+        # Store trainer reference for cancellation
+        app.state._current_trainer = trainer
+
         # Progress callback updates DB (called from trainer thread)
         def on_progress(epoch, total, loss, rank1, mAP):
             async def _update():
@@ -97,6 +289,19 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             asyncio.run_coroutine_threadsafe(_update(), loop).result(timeout=10)
 
         results = await asyncio.to_thread(trainer.train, progress_callback=on_progress)
+
+        # Clear trainer reference
+        app.state._current_trainer = None
+
+        # Check if training was cancelled
+        if trainer._cancel:
+            async with async_session() as db:
+                result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+                job = result.scalar_one()
+                job.status = "cancelled"
+                await db.commit()
+            logger.info("Training job %d cancelled", job_id)
+            return
 
         # Register model
         from app.ml.model_registry import ModelRegistry
@@ -121,38 +326,12 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             job.loss_history = json.dumps(results["loss_history"])
             await db.commit()
 
-        # Reload model into identifier (same logic as /reload-model)
-        model_registry = getattr(app.state, "model_registry", None)
-        embedding_store = getattr(app.state, "embedding_store", None)
-        if model_registry and embedding_store and pipeline:
-            from app.ml.identifier import CatIdentifier
-            from app.models.cat import Cat, CatEmbedding
-
-            new_identifier = CatIdentifier()
-            await new_identifier.load(results["model_path"])
-            pipeline._identifier = new_identifier
-
-            embedding_store.clear()
-            async with async_session() as db:
-                cat_result = await db.execute(select(Cat))
-                cats = cat_result.scalars().all()
-                for cat in cats:
-                    emb_result = await db.execute(
-                        select(CatEmbedding).where(CatEmbedding.cat_id == cat.id)
-                    )
-                    cat_embeddings = emb_result.scalars().all()
-                    if cat_embeddings:
-                        embeddings = [
-                            np.frombuffer(e.embedding, dtype=np.float32)
-                            for e in cat_embeddings
-                        ]
-                        embedding_store.add_cat(cat.id, cat.name, embeddings)
-
-            logger.info("Model reloaded after training: %d cats, %d embeddings",
-                        embedding_store.cat_count, embedding_store.total_embeddings)
+        # Reload model into identifier
+        await _reload_model_after_training(app, results["model_path"])
 
     except Exception as e:
         logger.error("Training job %d failed: %s", job_id, e)
+        app.state._current_trainer = None
         async with async_session() as db:
             result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
             job = result.scalar_one()
@@ -189,8 +368,17 @@ async def start_training(
     await db.refresh(job)
 
     # Launch training in background
-    asyncio.create_task(_run_training_job(job.id, data, request.app))
-    logger.info("Training job %d started (epochs=%d)", job.id, data.epochs)
+    if data.training_location == "remote":
+        if not settings.TRAINING_SERVER_SSH or not settings.TRAINING_API_KEY:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote training not configured (TRAINING_SERVER_SSH and TRAINING_API_KEY required)",
+            )
+        asyncio.create_task(_run_remote_training_job(job.id, data, request.app))
+        logger.info("Remote training job %d started (epochs=%d)", job.id, data.epochs)
+    else:
+        asyncio.create_task(_run_training_job(job.id, data, request.app))
+        logger.info("Training job %d started (epochs=%d)", job.id, data.epochs)
 
     return job
 
@@ -217,6 +405,35 @@ async def get_training_job(
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
+    return job
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_training_job(
+    job_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Cancel a running or pending training job."""
+    result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Training job not found")
+    if job.status not in ("pending", "running"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel job with status '{job.status}'")
+
+    # For local training, signal the trainer to stop
+    trainer = getattr(request.app.state, "_current_trainer", None)
+    if trainer:
+        trainer.cancel()
+
+    # Mark as cancelled (for pending jobs or as a fallback)
+    job.status = "cancelled"
+    await db.commit()
+    await db.refresh(job)
+
+    logger.info("Training job %d cancelled", job_id)
     return job
 
 

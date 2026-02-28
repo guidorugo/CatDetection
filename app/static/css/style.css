@@ -306,6 +306,30 @@ body {
 .status-disconnected, .status-failed, .status-disabled { background: rgba(220, 38, 38, 0.2); color: var(--danger); }
 .status-offline { background: rgba(100, 116, 139, 0.2); color: var(--text-muted); }
 .status-pending, .status-running { background: rgba(37, 99, 235, 0.2); color: var(--primary); }
+.status-cancelled { background: rgba(100, 116, 139, 0.2); color: var(--text-muted); }
+
+/* Progress bar */
+.progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-input);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--primary);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.progress-text {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
 
 /* Events */
 .event-item {
