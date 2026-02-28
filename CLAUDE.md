@@ -48,11 +48,14 @@
 
 - Server runs `scripts/training_server.py` (standalone FastAPI daemon, no `app.*` imports)
 - Jetson runs `scripts/training_client.sh` to push data, trigger training, poll, and pull the model
+- **UI remote training**: select "Train on remote server" in the training page (requires `TRAINING_SERVER_SSH` + `TRAINING_API_KEY` in `.env`). The app backend rsyncs data, triggers the server, polls progress, downloads the model, and hot-reloads — all from the browser
 - Server handles both `prepare_data.py` (YOLO cropping) and `train_identifier.py` as subprocesses
 - Auth via `X-API-Key` header (shared `TRAINING_API_KEY` env var)
 - PyTorch `.pth` files are portable between x86_64 ↔ ARM64 (`map_location=device`)
 - TensorRT `.engine` files are NOT portable (device-specific), but the app falls back to `.pth`
 - `POST /api/v1/training/reload-model` hot-swaps the identifier model without restarting the app
+- `POST /api/v1/training/jobs/{id}/cancel` cancels a running/pending training job
+- Training UI shows a live progress bar with auto-polling every 5s
 - SQLite stays on Jetson only; the server never touches the database
 - `scripts/sync_and_train.sh` is deprecated (kept for reference)
 
