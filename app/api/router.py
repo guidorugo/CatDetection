@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.api.v1 import auth, cameras, cats, events, recordings, training, ws
+from app.api.v1 import auth, cameras, cats, events, models, recordings, test, training, ws
 from app.core.config import settings
 
 api_router = APIRouter()
@@ -21,6 +21,8 @@ api_router.include_router(cats.router, prefix="/cats", tags=["cats"])
 api_router.include_router(events.router, prefix="/events", tags=["events"])
 api_router.include_router(recordings.router, prefix="/recordings", tags=["recordings"])
 api_router.include_router(training.router, prefix="/training", tags=["training"])
+api_router.include_router(test.router, prefix="/test", tags=["test"])
+api_router.include_router(models.router, prefix="/models", tags=["models"])
 api_router.include_router(ws.router, prefix="/ws", tags=["websocket"])
 
 templates_dir = Path(__file__).parent.parent / "templates"
@@ -69,6 +71,13 @@ async def events_page(request: Request):
 async def recordings_page(request: Request):
     return templates.TemplateResponse(
         "recordings.html", {"request": request, "active_page": "recordings"}
+    )
+
+
+@page_router.get("/test")
+async def test_page(request: Request):
+    return templates.TemplateResponse(
+        "test.html", {"request": request, "active_page": "test"}
     )
 
 

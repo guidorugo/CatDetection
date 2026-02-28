@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Test Detection - CatDetect{% endblock %}
+
+{% block head %}
+<style>
+    .test-layout {
+        display: grid;
+        grid-template-columns: 1fr 300px;
+        gap: 24px;
+        margin-top: 16px;
+    }
+    @media (max-width: 768px) {
+        .test-layout { grid-template-columns: 1fr; }
+    }
+    .canvas-container {
+        position: relative;
+        background: var(--bg-secondary, #f8f9fa);
+        border-radius: 8px;
+        overflow: hidden;
+        text-align: center;
+        min-height: 300px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .canvas-container canvas {
+        max-width: 100%;
+        border-radius: 8px;
+    }
+    .detection-item {
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin-bottom: 8px;
+    }
+    .detection-item .color-dot {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        margin-right: 8px;
+        vertical-align: middle;
+    }
+    .detection-item h4 { margin: 0 0 4px 0; }
+    .detection-item p { margin: 2px 0; font-size: 0.9em; color: var(--text-muted); }
+    .no-results {
+        color: var(--text-muted);
+        text-align: center;
+        padding: 24px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Test Detection</h1>
+</div>
+
+<div class="form-card">
+    <h3>Upload Image</h3>
+    <form id="testForm" onsubmit="analyzeImage(event)">
+        <div class="form-group">
+            <label>Select a photo to analyze</label>
+            <input type="file" id="imageInput" accept="image/*" required>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="analyzeBtn">Analyze</button>
+        </div>
+    </form>
+</div>
+
+<div id="results" style="display:none">
+    <h2>Results</h2>
+    <div class="test-layout">
+        <div class="canvas-container">
+            <canvas id="resultCanvas"></canvas>
+        </div>
+        <div id="detectionList"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+
+async function analyzeImage(e) {
+    e.preventDefault();
+    const fileInput = document.getElementById('imageInput');
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    const btn = document.getElementById('analyzeBtn');
+    btn.disabled = true;
+    btn.textContent = 'Analyzing...';
+
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const resp = await fetch('/api/v1/test/detect', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+            body: formData
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        showResults(file, data.detections);
+    } catch (err) {
+        alert('Analysis failed: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Analyze';
+    }
+}
+
+function showResults(file, detections) {
+    document.getElementById('results').style.display = 'block';
+
+    const img = new Image();
+    img.onload = () => {
+        const canvas = document.getElementById('resultCanvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+
+        detections.forEach((det, i) => {
+            const color = COLORS[i % COLORS.length];
+            const [x, y, w, h] = det.bbox;
+            const label = det.cat_name
+                ? `${det.cat_name} (${Math.round(det.similarity * 100)}%)`
+                : `Unknown (${Math.round(det.confidence * 100)}%)`;
+
+            // Draw bounding box
+            ctx.strokeStyle = color;
+            ctx.lineWidth = Math.max(2, Math.round(img.width / 400));
+            ctx.strokeRect(x, y, w, h);
+
+            // Draw label background
+            ctx.font = `bold ${Math.max(14, Math.round(img.width / 50))}px sans-serif`;
+            const textWidth = ctx.measureText(label).width;
+            const textHeight = Math.max(18, Math.round(img.width / 40));
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y - textHeight - 4, textWidth + 8, textHeight + 4);
+
+            // Draw label text
+            ctx.fillStyle = '#fff';
+            ctx.fillText(label, x + 4, y - 6);
+        });
+    };
+    img.src = URL.createObjectURL(file);
+
+    // Build detection list
+    const list = document.getElementById('detectionList');
+    if (detections.length === 0) {
+        list.innerHTML = '<div class="no-results">No cats detected in this image.</div>';
+        return;
+    }
+
+    list.innerHTML = detections.map((det, i) => {
+        const color = COLORS[i % COLORS.length];
+        const name = det.cat_name || 'Unknown';
+        const simPct = Math.round(det.similarity * 100);
+        const confPct = Math.round(det.confidence * 100);
+        return `
+        <div class="detection-item">
+            <h4><span class="color-dot" style="background:${color}"></span>${name}</h4>
+            <p>Confidence: ${confPct}%</p>
+            ${det.cat_id ? `<p>Similarity: ${simPct}%</p>` : '<p>No match in database</p>'}
+        </div>`;
+    }).join('');
+}
+</script>
+{% endblock %}
