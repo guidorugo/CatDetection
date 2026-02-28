@@ -13,6 +13,7 @@ Environment variables:
     TRAINING_HOST     — Bind address (default: 0.0.0.0).
 """
 import json
+import logging
 import os
 import re
 import subprocess
@@ -23,8 +24,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("training_server")
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_DIR / "models" / "identification"
@@ -75,6 +83,7 @@ def _run_pipeline(epochs: int):
     """Run prepare_data.py then train_identifier.py sequentially."""
     try:
         venv_python = sys.executable
+        logger.info("Pipeline started (epochs=%d)", epochs)
 
         # Phase 1: Prepare data
         with state_lock:
@@ -92,10 +101,13 @@ def _run_pipeline(epochs: int):
             capture_output=True, text=True, timeout=1800,
         )
         if result.returncode != 0:
+            logger.error("prepare_data.py failed (exit code %d)", result.returncode)
             with state_lock:
                 state["status"] = "error"
                 state["error"] = f"prepare_data.py failed:\n{result.stderr[-500:]}"
             return
+
+        logger.info("Data preparation complete")
 
         # Phase 2: Train
         with state_lock:
@@ -126,6 +138,7 @@ def _run_pipeline(epochs: int):
 
         proc.wait(timeout=7200)
         if proc.returncode != 0:
+            logger.error("train_identifier.py failed (exit code %d)", proc.returncode)
             with state_lock:
                 state["status"] = "error"
                 state["error"] = "train_identifier.py failed (exit code {})".format(proc.returncode)
@@ -146,6 +159,8 @@ def _run_pipeline(epochs: int):
             state["model_version"] = model_version
             state["completed_at"] = datetime.now(timezone.utc).isoformat()
 
+        logger.info("Pipeline complete — model version: %s", model_version)
+
     except subprocess.TimeoutExpired:
         with state_lock:
             state["status"] = "error"
@@ -159,19 +174,23 @@ def _run_pipeline(epochs: int):
 # --- Endpoints ---
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
+    logger.info("Health check from %s", request.client.host)
     return {"status": "ok"}
 
 
 @app.post("/prepare-and-train")
 async def prepare_and_train(
+    request: Request,
     epochs: int = Query(default=50, ge=1, le=500),
     x_api_key: str = Header(None),
 ):
     require_api_key(x_api_key)
+    logger.info("Training requested from %s (epochs=%d)", request.client.host, epochs)
 
     with state_lock:
         if state["status"] in ("preparing", "training"):
+            logger.warning("Rejected: training already in progress")
             raise HTTPException(409, "Training already in progress")
         reset_state()
         state["status"] = "preparing"
@@ -184,14 +203,16 @@ async def prepare_and_train(
 
 
 @app.get("/status")
-async def status(x_api_key: str = Header(None)):
+async def status(request: Request, x_api_key: str = Header(None)):
     require_api_key(x_api_key)
     with state_lock:
-        return dict(state)
+        current = dict(state)
+    logger.info("Status poll from %s — %s", request.client.host, current["status"])
+    return current
 
 
 @app.get("/model/latest")
-async def model_latest(x_api_key: str = Header(None)):
+async def model_latest(request: Request, x_api_key: str = Header(None)):
     require_api_key(x_api_key)
 
     if not REGISTRY_FILE.exists():
@@ -210,6 +231,7 @@ async def model_latest(x_api_key: str = Header(None)):
     if not model_path.exists():
         raise HTTPException(404, f"Model file not found: {model_path}")
 
+    logger.info("Model download from %s — %s", request.client.host, model_path.name)
     return FileResponse(
         str(model_path),
         media_type="application/octet-stream",
@@ -218,12 +240,13 @@ async def model_latest(x_api_key: str = Header(None)):
 
 
 @app.get("/model/registry")
-async def model_registry(x_api_key: str = Header(None)):
+async def model_registry(request: Request, x_api_key: str = Header(None)):
     require_api_key(x_api_key)
 
     if not REGISTRY_FILE.exists():
         raise HTTPException(404, "No model registry found")
 
+    logger.info("Registry download from %s", request.client.host)
     return JSONResponse(json.loads(REGISTRY_FILE.read_text()))
 
 
