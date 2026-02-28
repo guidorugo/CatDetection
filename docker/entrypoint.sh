@@ -4,10 +4,16 @@ set -e
 echo "=== CatDetect Entrypoint ==="
 
 # Set up SSH key with correct permissions (bind mounts lose file modes)
-if [ -f /root/.ssh-mount/id_ed25519 ]; then
-    mkdir -p /root/.ssh
-    cp /root/.ssh-mount/id_ed25519 /root/.ssh/id_ed25519
-    chmod 600 /root/.ssh/id_ed25519
+SSH_KEY_CONFIGURED=false
+mkdir -p /root/.ssh
+for keyfile in id_rsa id_ed25519 id_ecdsa; do
+    if [ -f "/root/.ssh-mount/${keyfile}" ]; then
+        cp "/root/.ssh-mount/${keyfile}" "/root/.ssh/${keyfile}"
+        chmod 600 "/root/.ssh/${keyfile}"
+        SSH_KEY_CONFIGURED=true
+    fi
+done
+if [ "$SSH_KEY_CONFIGURED" = true ]; then
     [ -f /root/.ssh-mount/known_hosts ] && cp /root/.ssh-mount/known_hosts /root/.ssh/known_hosts
     echo -e "Host *\n  StrictHostKeyChecking accept-new" > /root/.ssh/config
     echo "SSH key configured"
