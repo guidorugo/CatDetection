@@ -83,6 +83,7 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             subprocess.run,
             [
                 "rsync", "-az", "--delete",
+                "-e", "ssh -o StrictHostKeyChecking=accept-new",
                 str(settings.DATA_DIR) + "/",
                 f"{server_ssh}:{server_dir}/data/",
             ],
