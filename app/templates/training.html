@@ -24,6 +24,12 @@
                 <input type="number" id="trainFreeze" value="10" min="0">
             </div>
         </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label><input type="checkbox" id="trainPrepare" checked> Prepare data (YOLO crop + split)</label>
+                <small>Uncheck to reuse existing processed data</small>
+            </div>
+        </div>
         <div class="form-actions">
             <button type="submit" class="btn btn-primary">Start</button>
             <button type="button" class="btn btn-secondary" onclick="hideTrainForm()">Cancel</button>
@@ -78,6 +84,7 @@ async function startTraining(e) {
                 epochs: parseInt(document.getElementById('trainEpochs').value),
                 learning_rate: parseFloat(document.getElementById('trainLR').value),
                 freeze_epochs: parseInt(document.getElementById('trainFreeze').value),
+                prepare_data: document.getElementById('trainPrepare').checked,
             })
         });
         hideTrainForm();

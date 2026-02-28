@@ -36,17 +36,22 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             pipeline.pause()
             logger.info("Detection pipeline paused for training")
 
-        # Prepare data (YOLO crop + train/val/test split) if not already done
+        # Prepare data (YOLO crop + train/val/test split)
         from app.core.config import settings
 
         data_dir = str(settings.DATA_DIR)
         processed_dir = str(Path(data_dir) / "processed")
         train_dir = Path(processed_dir) / "train"
 
-        if not train_dir.exists():
+        if data.prepare_data or not train_dir.exists():
             logger.info("Preparing training data (YOLO cropping)...")
+            import shutil
             import subprocess
             import sys
+
+            # Clear old processed data for a clean re-crop
+            if Path(processed_dir).exists():
+                shutil.rmtree(processed_dir)
 
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -60,6 +65,8 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             if result.returncode != 0:
                 raise RuntimeError(f"Data preparation failed:\n{result.stderr[-500:]}")
             logger.info("Data preparation complete")
+        else:
+            logger.info("Skipping data preparation (using existing processed data)")
 
         from app.ml.training.trainer import CatReIDTrainer
 
