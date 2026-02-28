@@ -16,7 +16,8 @@ A web-based service that ingests live video from IoT cameras (ESP32/RTSP), detec
 - Web dashboard with live camera feeds
 - Camera health monitoring with auto-reconnection
 - JWT authentication
-- Training pipeline for custom cat identification
+- Training pipeline for custom cat identification (local or remote GPU server)
+- Training job cancellation and live progress tracking
 
 ## Quick Start (Local Development)
 
@@ -115,7 +116,17 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-### Training from the Jetson
+### Training from the Web UI
+
+When `TRAINING_SERVER_SSH` and `TRAINING_API_KEY` are configured in `.env`, the training page shows a "Train on remote server" option. Selecting it will:
+1. Rsync raw `data/` to the server automatically
+2. Trigger training on the remote GPU server
+3. Poll progress and show a live progress bar in the UI
+4. Download the trained model and hot-reload the identifier
+
+Training jobs can be cancelled from the UI at any time. The progress bar auto-polls every 5s while a job is running.
+
+### Training from the CLI (Jetson)
 
 ```bash
 # Set up SSH key auth to the server (for rsync)
@@ -155,7 +166,8 @@ Camera (RTSP/MJPEG) → FrameGrabber (threaded) → DetectionPipeline (async)
 - `GET/POST /api/v1/cats` — Cat profile management
 - `GET /api/v1/events` — Detection events (filterable, paginated)
 - `GET /api/v1/recordings` — Recording management
-- `POST /api/v1/training/start` — Start model training
+- `POST /api/v1/training/start` — Start model training (local or remote)
+- `POST /api/v1/training/jobs/{id}/cancel` — Cancel a running training job
 - `POST /api/v1/training/reload-model` — Hot-reload identifier model from disk
 - `WS /api/v1/ws/live/{camera_id}` — Live camera stream
 - `WS /api/v1/ws/events` — Real-time event notifications
