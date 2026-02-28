@@ -156,10 +156,17 @@ async def generate_embeddings(detector, identifier, embedding_store, db: AsyncSe
 
     summary = {}
     for cat in cats:
-        # Find images in data/{cat_name}/
+        # Find images in data/{cat_name}/ (case-insensitive match)
         cat_dir = Path(settings.DATA_DIR) / cat.name
         if not cat_dir.is_dir():
-            logger.warning("No data directory for cat '%s' at %s", cat.name, cat_dir)
+            # Try case-insensitive match
+            cat_dir = None
+            for d in Path(settings.DATA_DIR).iterdir():
+                if d.is_dir() and d.name.lower() == cat.name.lower():
+                    cat_dir = d
+                    break
+        if not cat_dir or not cat_dir.is_dir():
+            logger.warning("No data directory for cat '%s'", cat.name)
             summary[cat.name] = 0
             continue
 
