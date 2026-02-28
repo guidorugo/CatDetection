@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.database import async_session
 from app.core.logging import get_logger
 from app.models.training_job import TrainingJob
 from app.models.user import User
@@ -17,8 +19,123 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
+    """Run training in background: pause pipeline → train → register → reload → resume."""
+    pipeline = getattr(app.state, "detection_pipeline", None)
+
+    # Update job to running
+    async with async_session() as db:
+        result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+        job = result.scalar_one()
+        job.status = "running"
+        await db.commit()
+
+    try:
+        # Pause detection to free GPU memory
+        if pipeline:
+            pipeline.pause()
+            logger.info("Detection pipeline paused for training")
+
+        from app.ml.training.trainer import CatReIDTrainer
+
+        trainer = CatReIDTrainer(
+            data_dir="data/processed",
+            epochs=data.epochs,
+            learning_rate=data.learning_rate,
+            freeze_epochs=data.freeze_epochs,
+        )
+
+        # Progress callback updates DB (called from trainer thread)
+        def on_progress(epoch, total, loss, rank1, mAP):
+            async def _update():
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(TrainingJob).where(TrainingJob.id == job_id)
+                    )
+                    job = result.scalar_one()
+                    job.epochs_completed = epoch
+                    job.best_metric = rank1
+                    history = json.loads(job.loss_history) if job.loss_history else []
+                    history.append({"epoch": epoch, "loss": float(loss), "rank1": float(rank1), "mAP": float(mAP)})
+                    job.loss_history = json.dumps(history)
+                    await db.commit()
+
+            # Schedule the async update from the sync callback
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(_update(), loop).result(timeout=10)
+
+        results = await asyncio.to_thread(trainer.train, progress_callback=on_progress)
+
+        # Register model
+        from app.ml.model_registry import ModelRegistry
+
+        registry = ModelRegistry()
+        registry.register_model(
+            version=results["version"],
+            path=results["model_path"],
+            metrics={"rank1": results["best_rank1"]},
+        )
+        registry.activate_model(results["version"])
+        logger.info("Registered model version %s", results["version"])
+
+        # Update job as completed
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "completed"
+            job.model_version = results["version"]
+            job.model_path = results["model_path"]
+            job.best_metric = results["best_rank1"]
+            job.loss_history = json.dumps(results["loss_history"])
+            await db.commit()
+
+        # Reload model into identifier (same logic as /reload-model)
+        model_registry = getattr(app.state, "model_registry", None)
+        embedding_store = getattr(app.state, "embedding_store", None)
+        if model_registry and embedding_store and pipeline:
+            from app.ml.identifier import CatIdentifier
+            from app.models.cat import Cat, CatEmbedding
+
+            new_identifier = CatIdentifier()
+            await new_identifier.load(results["model_path"])
+            pipeline._identifier = new_identifier
+
+            embedding_store.clear()
+            async with async_session() as db:
+                cat_result = await db.execute(select(Cat))
+                cats = cat_result.scalars().all()
+                for cat in cats:
+                    emb_result = await db.execute(
+                        select(CatEmbedding).where(CatEmbedding.cat_id == cat.id)
+                    )
+                    cat_embeddings = emb_result.scalars().all()
+                    if cat_embeddings:
+                        embeddings = [
+                            np.frombuffer(e.embedding, dtype=np.float32)
+                            for e in cat_embeddings
+                        ]
+                        embedding_store.add_cat(cat.id, cat.name, embeddings)
+
+            logger.info("Model reloaded after training: %d cats, %d embeddings",
+                        embedding_store.cat_count, embedding_store.total_embeddings)
+
+    except Exception as e:
+        logger.error("Training job %d failed: %s", job_id, e)
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "failed"
+            job.error_message = str(e)
+            await db.commit()
+    finally:
+        if pipeline:
+            pipeline.resume()
+            logger.info("Detection pipeline resumed")
+
+
 @router.post("/start", response_model=TrainingJobResponse, status_code=status.HTTP_201_CREATED)
 async def start_training(
+    request: Request,
     data: TrainingStart,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
@@ -39,7 +156,10 @@ async def start_training(
     await db.commit()
     await db.refresh(job)
 
-    # Training will be started by the training service (Phase 4)
+    # Launch training in background
+    asyncio.create_task(_run_training_job(job.id, data, request.app))
+    logger.info("Training job %d started (epochs=%d)", job.id, data.epochs)
+
     return job
 
 
