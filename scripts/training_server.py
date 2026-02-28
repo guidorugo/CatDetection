@@ -240,7 +240,7 @@ async def prepare_and_train(
 async def status(request: Request, x_api_key: str = Header(None)):
     require_api_key(x_api_key)
     with state_lock:
-        current = dict(state)
+        current = {k: v for k, v in state.items() if not k.startswith("_")}
     logger.info("Status poll from %s — %s", request.client.host, current["status"])
     return current
 
