@@ -11,21 +11,34 @@
 # Prerequisites:
 #   - SSH key auth to server (ssh-copy-id user@server)
 #   - Server is running training_server.py
-#   - Jetson CatDetect app is running with a valid auth token
+#   - Jetson CatDetect app is running (for model reload at the end)
 #
 # Usage:
 #   ./scripts/training_client.sh [--epochs 50]
 #
-# Environment variables:
-#   TRAINING_SERVER_HOST  — Server hostname/IP (required)
+# Configuration is read from .env (same file the app uses). Relevant vars:
+#   TRAINING_SERVER_HOST  — Server hostname/IP
 #   TRAINING_SERVER_PORT  — Server API port (default: 8001)
-#   TRAINING_API_KEY      — Shared secret for server auth (required)
-#   TRAINING_SERVER_SSH   — SSH user@host for rsync (required, e.g. user@192.168.1.200)
+#   TRAINING_API_KEY      — Shared secret (same value on server and client)
+#   TRAINING_SERVER_SSH   — SSH user@host for rsync (e.g. user@192.168.1.200)
 #   TRAINING_SERVER_DIR   — Project dir on server (default: ~/cat-detection-project)
-#   CATDETECT_TOKEN       — JWT token for local reload endpoint (required)
-#   CATDETECT_URL         — Local CatDetect URL (default: http://localhost:8000)
+#
+# The script auto-obtains a JWT from the local app using ADMIN_USERNAME/ADMIN_PASSWORD
+# from .env, so no separate token management is needed.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# --- Load .env ---
+if [ -f "${PROJECT_DIR}/.env" ]; then
+    # Export vars from .env, skipping comments and blank lines
+    set -a
+    # shellcheck disable=SC1091
+    source <(grep -v '^\s*#' "${PROJECT_DIR}/.env" | grep -v '^\s*$')
+    set +a
+fi
 
 # --- Parse arguments ---
 EPOCHS=50
@@ -37,18 +50,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Configuration ---
-TRAINING_SERVER_HOST="${TRAINING_SERVER_HOST:?Set TRAINING_SERVER_HOST (e.g., 192.168.1.200)}"
+TRAINING_SERVER_HOST="${TRAINING_SERVER_HOST:?Set TRAINING_SERVER_HOST in .env}"
 TRAINING_SERVER_PORT="${TRAINING_SERVER_PORT:-8001}"
-TRAINING_API_KEY="${TRAINING_API_KEY:?Set TRAINING_API_KEY}"
-TRAINING_SERVER_SSH="${TRAINING_SERVER_SSH:?Set TRAINING_SERVER_SSH (e.g., user@192.168.1.200)}"
+TRAINING_API_KEY="${TRAINING_API_KEY:?Set TRAINING_API_KEY in .env}"
+TRAINING_SERVER_SSH="${TRAINING_SERVER_SSH:?Set TRAINING_SERVER_SSH in .env (e.g., user@192.168.1.200)}"
 TRAINING_SERVER_DIR="${TRAINING_SERVER_DIR:-~/cat-detection-project}"
-CATDETECT_TOKEN="${CATDETECT_TOKEN:?Set CATDETECT_TOKEN (JWT for reload endpoint)}"
 CATDETECT_URL="${CATDETECT_URL:-http://localhost:8000}"
 
 SERVER_API="http://${TRAINING_SERVER_HOST}:${TRAINING_SERVER_PORT}"
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "=== CatDetect: Remote Training ==="
 echo "Server: ${TRAINING_SERVER_SSH} (API: ${SERVER_API})"
@@ -190,6 +199,27 @@ echo ""
 
 # --- Step 5: Reload model on Jetson app ---
 echo "[5/5] Reloading model on local CatDetect app..."
+
+# Auto-login using admin credentials from .env
+ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}"
+
+LOGIN_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+    "${CATDETECT_URL}/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\": \"${ADMIN_USERNAME}\", \"password\": \"${ADMIN_PASSWORD}\"}")
+
+LOGIN_CODE=$(echo "$LOGIN_RESPONSE" | tail -1)
+LOGIN_BODY=$(echo "$LOGIN_RESPONSE" | head -n -1)
+
+if [ "$LOGIN_CODE" != "200" ]; then
+    echo "ERROR: Login failed (HTTP ${LOGIN_CODE})"
+    echo "$LOGIN_BODY"
+    exit 1
+fi
+
+CATDETECT_TOKEN=$(echo "$LOGIN_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
     "${CATDETECT_URL}/api/v1/training/reload-model" \
     -H "Authorization: Bearer ${CATDETECT_TOKEN}" \
