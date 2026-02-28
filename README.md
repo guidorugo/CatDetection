@@ -121,22 +121,19 @@ WantedBy=multi-user.target
 # Set up SSH key auth to the server (for rsync)
 ssh-copy-id user@server-ip
 
-# Set environment variables
-export TRAINING_SERVER_HOST=192.168.1.200
-export TRAINING_SERVER_SSH=user@192.168.1.200
-export TRAINING_API_KEY=your-secret
-export CATDETECT_TOKEN=your-jwt-token
+# Configure .env with remote training settings (TRAINING_SERVER_HOST,
+# TRAINING_API_KEY, TRAINING_SERVER_SSH — see .env.example)
 
 # Run training (default 50 epochs)
 ./scripts/training_client.sh --epochs 50
 ```
 
-The client script:
+The client script reads all configuration from `.env` (same file the app uses) and auto-logs in using `ADMIN_USERNAME`/`ADMIN_PASSWORD` for the model reload step. It:
 1. Rsyncs raw `data/` (excluding `processed/`) to the server
 2. Triggers `/prepare-and-train` (server runs YOLO cropping + model training)
 3. Polls `/status` every 30s showing progress
 4. Downloads the trained `.pth` model and registry
-5. Calls `POST /api/v1/training/reload-model` to hot-swap the model
+5. Auto-logs in and calls `POST /api/v1/training/reload-model` to hot-swap the model
 
 Detection continues running on the Jetson throughout. PyTorch `.pth` models are portable between x86_64 and ARM64.
 
