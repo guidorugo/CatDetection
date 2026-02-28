@@ -53,6 +53,29 @@ async def _reload_model_after_training(app, model_path: str):
                     embedding_store.cat_count, embedding_store.total_embeddings)
 
 
+async def _generate_embeddings_after_training(app):
+    """Generate reference embeddings from training data after model reload."""
+    detector = getattr(app.state, "detector", None)
+    identifier = getattr(app.state, "identifier", None) or (
+        getattr(app.state, "detection_pipeline", None) and
+        getattr(app.state.detection_pipeline, "_identifier", None)
+    )
+    embedding_store = getattr(app.state, "embedding_store", None)
+
+    if not detector or not identifier or not identifier.model or not embedding_store:
+        logger.warning("Skipping embedding generation: pipeline components not available")
+        return
+
+    from app.api.v1.cats import generate_embeddings
+
+    async with async_session() as db:
+        summary = await generate_embeddings(detector, identifier, embedding_store, db)
+
+    total = sum(summary.values())
+    logger.info("Auto-generated %d reference embeddings for %d cats after training",
+                total, len(summary))
+
+
 async def _resume_remote_training_job(job_id: int, job_config: dict, app) -> None:
     """Resume polling a remote training job after a restart.
 
@@ -222,6 +245,9 @@ async def _resume_remote_training_job(job_id: int, job_config: dict, app) -> Non
                 await _reload_model_after_training(app, model_path)
             finally:
                 pipeline.resume()
+
+        step = "generating embeddings"
+        await _generate_embeddings_after_training(app)
 
         logger.info("Resumed remote training job %d completed successfully", job_id)
 
@@ -492,6 +518,10 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             finally:
                 pipeline.resume()
 
+        # Generate reference embeddings from training data
+        step = "generating embeddings"
+        await _generate_embeddings_after_training(app)
+
     except Exception as e:
         logger.error("Remote training job %d failed at step '%s': %s: %s",
                      job_id, step, type(e).__name__, e)
@@ -621,6 +651,9 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
 
         # Reload model into identifier
         await _reload_model_after_training(app, results["model_path"])
+
+        # Generate reference embeddings from training data
+        await _generate_embeddings_after_training(app)
 
     except Exception as e:
         logger.error("Training job %d failed: %s", job_id, e)
