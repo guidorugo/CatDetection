@@ -58,7 +58,8 @@ async def test_list_events(client: AsyncClient, auth_headers, sample_events):
     resp = await client.get("/api/v1/events/", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 6
+    assert data["total"] == 6
+    assert len(data["items"]) == 6
 
 
 @pytest.mark.asyncio
@@ -71,8 +72,9 @@ async def test_list_events_filter_by_camera(
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 6
-    assert all(e["camera_id"] == camera.id for e in data)
+    assert data["total"] == 6
+    assert len(data["items"]) == 6
+    assert all(e["camera_id"] == camera.id for e in data["items"])
 
 
 @pytest.mark.asyncio
@@ -85,7 +87,8 @@ async def test_list_events_filter_by_cat(
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 5  # excludes the unknown cat event
+    assert data["total"] == 5
+    assert len(data["items"]) == 5  # excludes the unknown cat event
 
 
 @pytest.mark.asyncio
@@ -93,15 +96,16 @@ async def test_list_events_pagination(client: AsyncClient, auth_headers, sample_
     resp = await client.get("/api/v1/events/?limit=3&offset=0", headers=auth_headers)
     assert resp.status_code == 200
     page1 = resp.json()
-    assert len(page1) == 3
+    assert page1["total"] == 6
+    assert len(page1["items"]) == 3
 
     resp = await client.get("/api/v1/events/?limit=3&offset=3", headers=auth_headers)
     page2 = resp.json()
-    assert len(page2) == 3
+    assert len(page2["items"]) == 3
 
     # Different events on each page
-    ids1 = {e["id"] for e in page1}
-    ids2 = {e["id"] for e in page2}
+    ids1 = {e["id"] for e in page1["items"]}
+    ids2 = {e["id"] for e in page2["items"]}
     assert ids1.isdisjoint(ids2)
 
 

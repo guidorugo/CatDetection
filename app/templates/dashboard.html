@@ -86,8 +86,8 @@ async function loadDashboard() {
 
     // Load recent events
     try {
-        const events = await apiFetch('/api/v1/events?limit=10');
-        renderEventList(events, document.getElementById('recentEvents'));
+        const data = await apiFetch('/api/v1/events?limit=10');
+        renderEventList(data.items, document.getElementById('recentEvents'));
     } catch (e) { console.error('Failed to load events:', e); }
 }
 </script>

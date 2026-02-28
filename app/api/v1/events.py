@@ -15,7 +15,7 @@ from app.schemas.event import EventResponse, EventStats
 router = APIRouter()
 
 
-@router.get("/", response_model=list[EventResponse])
+@router.get("/")
 async def list_events(
     camera_id: int | None = None,
     cat_id: int | None = None,
@@ -26,34 +26,45 @@ async def list_events(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    query = select(DetectionEvent).options(
-        joinedload(DetectionEvent.cat),
-        joinedload(DetectionEvent.camera),
-    )
-
+    # Build filter conditions
+    conditions = []
     if camera_id is not None:
-        query = query.where(DetectionEvent.camera_id == camera_id)
+        conditions.append(DetectionEvent.camera_id == camera_id)
     if cat_id is not None:
-        query = query.where(DetectionEvent.cat_id == cat_id)
+        conditions.append(DetectionEvent.cat_id == cat_id)
     if start_time is not None:
-        query = query.where(DetectionEvent.timestamp >= start_time)
+        conditions.append(DetectionEvent.timestamp >= start_time)
     if end_time is not None:
-        query = query.where(DetectionEvent.timestamp <= end_time)
+        conditions.append(DetectionEvent.timestamp <= end_time)
 
-    query = query.order_by(DetectionEvent.timestamp.desc()).limit(limit).offset(offset)
+    # Count total matching
+    count_query = select(func.count(DetectionEvent.id))
+    for cond in conditions:
+        count_query = count_query.where(cond)
+    total = (await db.execute(count_query)).scalar()
+
+    # Fetch page
+    query = (
+        select(DetectionEvent)
+        .options(joinedload(DetectionEvent.cat), joinedload(DetectionEvent.camera))
+    )
+    for cond in conditions:
+        query = query.where(cond)
+    query = query.order_by(DetectionEvent.timestamp.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
     events = result.unique().scalars().all()
 
     # Populate cat_name and camera_name
-    responses = []
+    items = []
     for event in events:
         resp = EventResponse.model_validate(event)
         if event.cat:
             resp.cat_name = event.cat.name
         if event.camera:
             resp.camera_name = event.camera.name
-        responses.append(resp)
-    return responses
+        items.append(resp)
+
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/stats", response_model=EventStats)

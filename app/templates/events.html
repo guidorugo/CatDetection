@@ -7,10 +7,10 @@
 </div>
 
 <div class="filter-bar">
-    <select id="filterCamera" onchange="loadEvents()">
+    <select id="filterCamera" onchange="currentPage=0; loadEvents()">
         <option value="">All Cameras</option>
     </select>
-    <select id="filterCat" onchange="loadEvents()">
+    <select id="filterCat" onchange="currentPage=0; loadEvents()">
         <option value="">All Cats</option>
     </select>
     <button class="btn btn-sm" onclick="loadEvents()">Refresh</button>
@@ -26,8 +26,8 @@
 {% block scripts %}
 <script src="/static/js/events.js"></script>
 <script>
-let currentOffset = 0;
 const PAGE_SIZE = 50;
+let currentPage = 0;
 
 document.addEventListener('DOMContentLoaded', async () => {
     // Load filter options
@@ -60,23 +60,36 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadEvents() {
     const cameraId = document.getElementById('filterCamera').value;
     const catId = document.getElementById('filterCat').value;
-    let url = `/api/v1/events?limit=${PAGE_SIZE}&offset=${currentOffset}`;
+    const offset = currentPage * PAGE_SIZE;
+    let url = `/api/v1/events?limit=${PAGE_SIZE}&offset=${offset}`;
     if (cameraId) url += `&camera_id=${cameraId}`;
     if (catId) url += `&cat_id=${catId}`;
 
-    const events = await apiFetch(url);
-    renderEventList(events, document.getElementById('eventList'));
+    const data = await apiFetch(url);
+    renderEventList(data.items, document.getElementById('eventList'));
 
     // Pagination
+    const total = data.total;
+    const totalPages = Math.ceil(total / PAGE_SIZE);
     const pag = document.getElementById('pagination');
-    pag.innerHTML = `
-        <button class="btn btn-sm" ${currentOffset === 0 ? 'disabled' : ''} onclick="prevPage()">Previous</button>
-        <span>Showing ${currentOffset + 1}-${currentOffset + events.length}</span>
-        <button class="btn btn-sm" ${events.length < PAGE_SIZE ? 'disabled' : ''} onclick="nextPage()">Next</button>
-    `;
+    if (totalPages <= 1) {
+        pag.innerHTML = total > 0 ? `<span>${total} event${total !== 1 ? 's' : ''}</span>` : '';
+        return;
+    }
+
+    let btns = '';
+    btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>&laquo; Prev</button>`;
+    for (let i = 0; i < totalPages; i++) {
+        btns += `<button class="btn btn-sm ${i === currentPage ? 'btn-primary' : 'btn-secondary'}" onclick="goToPage(${i})">${i + 1}</button>`;
+    }
+    btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next &raquo;</button>`;
+    btns += `<span style="margin-left:8px">${total} event${total !== 1 ? 's' : ''}</span>`;
+    pag.innerHTML = btns;
 }
 
-function prevPage() { currentOffset = Math.max(0, currentOffset - PAGE_SIZE); loadEvents(); }
-function nextPage() { currentOffset += PAGE_SIZE; loadEvents(); }
+function goToPage(page) {
+    currentPage = page;
+    loadEvents();
+}
 </script>
 {% endblock %}
