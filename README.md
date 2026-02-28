@@ -121,8 +121,8 @@ WantedBy=multi-user.target
 # Set up SSH key auth to the server (for rsync)
 ssh-copy-id user@server-ip
 
-# Configure .env with remote training settings (TRAINING_SERVER_HOST,
-# TRAINING_API_KEY, TRAINING_SERVER_SSH — see .env.example)
+# Configure .env with remote training settings (TRAINING_SERVER_SSH,
+# TRAINING_API_KEY — see .env.example)
 
 # Run training (default 50 epochs)
 ./scripts/training_client.sh --epochs 50

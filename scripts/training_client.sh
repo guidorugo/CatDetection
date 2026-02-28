@@ -17,10 +17,9 @@
 #   ./scripts/training_client.sh [--epochs 50]
 #
 # Configuration is read from .env (same file the app uses). Relevant vars:
-#   TRAINING_SERVER_HOST  — Server hostname/IP
+#   TRAINING_SERVER_SSH   — SSH user@host for rsync and API (e.g. user@192.168.1.200)
 #   TRAINING_SERVER_PORT  — Server API port (default: 8001)
 #   TRAINING_API_KEY      — Shared secret (same value on server and client)
-#   TRAINING_SERVER_SSH   — SSH user@host for rsync (e.g. user@192.168.1.200)
 #   TRAINING_SERVER_DIR   — Project dir on server (default: ~/cat-detection-project)
 #
 # The script auto-obtains a JWT from the local app using ADMIN_USERNAME/ADMIN_PASSWORD
@@ -50,13 +49,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Configuration ---
-TRAINING_SERVER_HOST="${TRAINING_SERVER_HOST:?Set TRAINING_SERVER_HOST in .env}"
+TRAINING_SERVER_SSH="${TRAINING_SERVER_SSH:?Set TRAINING_SERVER_SSH in .env (e.g., user@192.168.1.200)}"
 TRAINING_SERVER_PORT="${TRAINING_SERVER_PORT:-8001}"
 TRAINING_API_KEY="${TRAINING_API_KEY:?Set TRAINING_API_KEY in .env}"
-TRAINING_SERVER_SSH="${TRAINING_SERVER_SSH:?Set TRAINING_SERVER_SSH in .env (e.g., user@192.168.1.200)}"
 TRAINING_SERVER_DIR="${TRAINING_SERVER_DIR:-~/cat-detection-project}"
 CATDETECT_URL="${CATDETECT_URL:-http://localhost:8000}"
 
+# Derive hostname from SSH target (strip user@ prefix)
+TRAINING_SERVER_HOST="${TRAINING_SERVER_SSH#*@}"
 SERVER_API="http://${TRAINING_SERVER_HOST}:${TRAINING_SERVER_PORT}"
 
 echo "=== CatDetect: Remote Training ==="
