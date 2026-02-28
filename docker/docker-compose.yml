@@ -14,8 +14,8 @@ services:
       - /ssd/projects/cat-detection-project/recordings:/app/recordings
       - /ssd/projects/cat-detection-project/thumbnails:/app/thumbnails
       - catdetect-db:/app/db
-      - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
-      - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+      - ~/.ssh/id_ed25519:/root/.ssh-mount/id_ed25519:ro
+      - ~/.ssh/known_hosts:/root/.ssh-mount/known_hosts:ro
     env_file:
       - ../.env
     environment:
