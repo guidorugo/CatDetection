@@ -76,9 +76,11 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
         job.status = "running"
         await db.commit()
 
+    step = "initializing"
     try:
         # Step 1: rsync data/ to remote server
-        logger.info("Rsyncing data to %s:%s/data/", server_ssh, server_dir)
+        step = f"rsync to {server_ssh}:{server_dir}/data/"
+        logger.info("Step 1: %s", step)
         rsync_result = await asyncio.to_thread(
             subprocess.run,
             [
@@ -94,27 +96,67 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
         logger.info("Data rsync complete")
 
         # Step 2: Trigger training on the remote server
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{base_url}/prepare-and-train",
-                params={"epochs": data.epochs},
-                headers={"X-API-Key": api_key},
-            )
-            if resp.status_code == 409:
-                raise RuntimeError("Remote server already has a training job running")
-            resp.raise_for_status()
+        step = f"POST {base_url}/prepare-and-train"
+        logger.info("Step 2: %s", step)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{base_url}/prepare-and-train",
+                    params={"epochs": data.epochs},
+                    headers={"X-API-Key": api_key},
+                )
+                if resp.status_code == 409:
+                    raise RuntimeError("Remote server already has a training job running")
+                resp.raise_for_status()
+        except httpx.ConnectError:
+            raise RuntimeError(f"Cannot connect to training server at {base_url} — is it running?")
+        except httpx.TimeoutException:
+            raise RuntimeError(f"Timeout connecting to training server at {base_url}")
         logger.info("Remote training triggered (epochs=%d)", data.epochs)
 
         # Step 3: Poll status every 10s
+        step = f"polling {base_url}/status"
+        poll_failures = 0
         while True:
             await asyncio.sleep(10)
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    f"{base_url}/status",
-                    headers={"X-API-Key": api_key},
+
+            # Check if job was cancelled locally
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == job_id)
                 )
-                resp.raise_for_status()
-                remote_status = resp.json()
+                job = result.scalar_one()
+                if job.status == "cancelled":
+                    logger.info("Remote training job %d cancelled locally, notifying server", job_id)
+                    try:
+                        async with httpx.AsyncClient(timeout=10) as client:
+                            await client.post(
+                                f"{base_url}/cancel",
+                                headers={"X-API-Key": api_key},
+                            )
+                    except Exception:
+                        pass  # best-effort cancel on server
+                    return
+
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        f"{base_url}/status",
+                        headers={"X-API-Key": api_key},
+                    )
+                    resp.raise_for_status()
+                    remote_status = resp.json()
+                poll_failures = 0
+            except (httpx.ConnectError, httpx.TimeoutException) as poll_err:
+                poll_failures += 1
+                logger.warning("Status poll failed (%d/3): %s: %s",
+                               poll_failures, type(poll_err).__name__, poll_err)
+                if poll_failures >= 3:
+                    raise RuntimeError(
+                        f"Lost connection to training server at {base_url} "
+                        f"({poll_failures} consecutive poll failures)"
+                    )
+                continue
 
             rs = remote_status["status"]
             progress_str = remote_status.get("progress")
@@ -138,38 +180,57 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             if rs == "complete":
                 logger.info("Remote training complete")
                 break
+            elif rs == "cancelled":
+                logger.info("Remote training cancelled by server")
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(TrainingJob).where(TrainingJob.id == job_id)
+                    )
+                    job = result.scalar_one()
+                    job.status = "cancelled"
+                    await db.commit()
+                return
             elif rs == "error":
                 raise RuntimeError(f"Remote training failed: {remote_status.get('error')}")
 
         # Step 4: Download model and registry from server
+        step = f"downloading model from {base_url}/model/latest"
+        logger.info("Step 4: %s", step)
         save_dir = Path(settings.MODELS_DIR) / "identification"
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            # Download model file
-            resp = await client.get(
-                f"{base_url}/model/latest",
-                headers={"X-API-Key": api_key},
-            )
-            resp.raise_for_status()
-            # Get filename from content-disposition or use default
-            filename = "cat_reid_remote.pth"
-            cd = resp.headers.get("content-disposition", "")
-            if "filename=" in cd:
-                filename = cd.split("filename=")[-1].strip('" ')
-            model_path = str(save_dir / filename)
-            Path(model_path).write_bytes(resp.content)
-            logger.info("Downloaded model to %s", model_path)
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                # Download model file
+                resp = await client.get(
+                    f"{base_url}/model/latest",
+                    headers={"X-API-Key": api_key},
+                )
+                resp.raise_for_status()
+                # Get filename from content-disposition or use default
+                filename = "cat_reid_remote.pth"
+                cd = resp.headers.get("content-disposition", "")
+                if "filename=" in cd:
+                    filename = cd.split("filename=")[-1].strip('" ')
+                model_path = str(save_dir / filename)
+                Path(model_path).write_bytes(resp.content)
+                logger.info("Downloaded model to %s", model_path)
 
-            # Download registry and merge
-            resp = await client.get(
-                f"{base_url}/model/registry",
-                headers={"X-API-Key": api_key},
-            )
-            resp.raise_for_status()
-            remote_registry = resp.json()
+                # Download registry and merge
+                step = f"downloading registry from {base_url}/model/registry"
+                resp = await client.get(
+                    f"{base_url}/model/registry",
+                    headers={"X-API-Key": api_key},
+                )
+                resp.raise_for_status()
+                remote_registry = resp.json()
+        except httpx.ConnectError:
+            raise RuntimeError(f"Cannot connect to training server at {base_url} during model download")
+        except httpx.TimeoutException:
+            raise RuntimeError(f"Timeout downloading model from {base_url}")
 
         # Fix paths in registry to point to local model
+        step = "registering model"
         from app.ml.model_registry import ModelRegistry
 
         registry = ModelRegistry()
@@ -194,6 +255,7 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             await db.commit()
 
         # Reload model
+        step = "reloading model"
         if pipeline:
             pipeline.pause()
             try:
@@ -202,12 +264,13 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
                 pipeline.resume()
 
     except Exception as e:
-        logger.error("Remote training job %d failed: %s", job_id, e)
+        logger.error("Remote training job %d failed at step '%s': %s: %s",
+                     job_id, step, type(e).__name__, e)
         async with async_session() as db:
             result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
             job = result.scalar_one()
             job.status = "failed"
-            job.error_message = str(e)
+            job.error_message = f"[{step}] {e}"
             await db.commit()
 
 
@@ -426,12 +489,34 @@ async def cancel_training_job(
     if job.status not in ("pending", "running"):
         raise HTTPException(status_code=400, detail=f"Cannot cancel job with status '{job.status}'")
 
-    # For local training, signal the trainer to stop
-    trainer = getattr(request.app.state, "_current_trainer", None)
-    if trainer:
-        trainer.cancel()
+    # Determine if this is a remote job
+    job_config = json.loads(job.config) if job.config else {}
+    is_remote = job_config.get("training_location") == "remote"
 
-    # Mark as cancelled (for pending jobs or as a fallback)
+    if is_remote:
+        # Cancel on the remote server (best-effort)
+        server_ssh = job_config.get("server_ssh") or settings.TRAINING_SERVER_SSH
+        server_port = job_config.get("server_port") or settings.TRAINING_SERVER_PORT
+        api_key = job_config.get("api_key") or settings.TRAINING_API_KEY
+        if server_ssh and api_key:
+            import httpx
+            base_url = f"http://{server_ssh.split('@')[-1]}:{server_port}"
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.post(
+                        f"{base_url}/cancel",
+                        headers={"X-API-Key": api_key},
+                    )
+                logger.info("Cancel request sent to remote server %s", base_url)
+            except Exception as e:
+                logger.warning("Failed to cancel on remote server: %s", e)
+    else:
+        # For local training, signal the trainer to stop
+        trainer = getattr(request.app.state, "_current_trainer", None)
+        if trainer:
+            trainer.cancel()
+
+    # Mark as cancelled
     job.status = "cancelled"
     await db.commit()
     await db.refresh(job)

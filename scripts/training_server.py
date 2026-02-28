@@ -45,13 +45,15 @@ app = FastAPI(title="CatDetect Training Server")
 # --- Training state (single-job, in-memory) ---
 
 state = {
-    "status": "idle",       # idle | preparing | training | complete | error
+    "status": "idle",       # idle | preparing | training | complete | error | cancelled
     "phase": None,          # "prepare_data" | "train" | None
     "progress": None,       # e.g. "12/50 epochs"
     "error": None,
     "model_version": None,
     "started_at": None,
     "completed_at": None,
+    "_proc": None,          # subprocess reference for cancellation
+    "_cancel": False,       # cancel flag
 }
 state_lock = threading.Lock()
 
@@ -65,6 +67,8 @@ def reset_state():
         "model_version": None,
         "started_at": None,
         "completed_at": None,
+        "_proc": None,
+        "_cancel": False,
     })
 
 
@@ -96,21 +100,38 @@ def _run_pipeline(epochs: int):
             "--data-dir", str(PROJECT_DIR / "data"),
             "--output-dir", str(PROJECT_DIR / "data" / "processed"),
         ]
-        result = subprocess.run(
+        prep_proc = subprocess.Popen(
             cmd_prepare, cwd=str(PROJECT_DIR),
-            capture_output=True, text=True, timeout=1800,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
         )
-        if result.returncode != 0:
-            logger.error("prepare_data.py failed (exit code %d)", result.returncode)
+        with state_lock:
+            state["_proc"] = prep_proc
+
+        stdout, stderr = prep_proc.communicate(timeout=1800)
+
+        with state_lock:
+            state["_proc"] = None
+            if state["_cancel"]:
+                state["status"] = "cancelled"
+                logger.info("Pipeline cancelled during data preparation")
+                return
+
+        if prep_proc.returncode != 0:
+            logger.error("prepare_data.py failed (exit code %d)", prep_proc.returncode)
             with state_lock:
                 state["status"] = "error"
-                state["error"] = f"prepare_data.py failed:\n{result.stderr[-500:]}"
+                state["error"] = f"prepare_data.py failed:\n{stderr[-500:]}"
             return
 
         logger.info("Data preparation complete")
 
         # Phase 2: Train
         with state_lock:
+            if state["_cancel"]:
+                state["status"] = "cancelled"
+                logger.info("Pipeline cancelled before training")
+                return
             state["status"] = "training"
             state["phase"] = "train"
             state["progress"] = "0/{} epochs".format(epochs)
@@ -125,6 +146,8 @@ def _run_pipeline(epochs: int):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
         )
+        with state_lock:
+            state["_proc"] = proc
 
         epoch_re = re.compile(r"Epoch\s+(\d+)/(\d+)")
         for line in proc.stdout:
@@ -135,8 +158,19 @@ def _run_pipeline(epochs: int):
             if m:
                 with state_lock:
                     state["progress"] = f"{m.group(1)}/{m.group(2)} epochs"
+            with state_lock:
+                if state["_cancel"]:
+                    break
 
         proc.wait(timeout=7200)
+
+        with state_lock:
+            state["_proc"] = None
+            if state["_cancel"]:
+                state["status"] = "cancelled"
+                logger.info("Pipeline cancelled during training")
+                return
+
         if proc.returncode != 0:
             logger.error("train_identifier.py failed (exit code %d)", proc.returncode)
             with state_lock:
@@ -209,6 +243,21 @@ async def status(request: Request, x_api_key: str = Header(None)):
         current = dict(state)
     logger.info("Status poll from %s — %s", request.client.host, current["status"])
     return current
+
+
+@app.post("/cancel")
+async def cancel(request: Request, x_api_key: str = Header(None)):
+    require_api_key(x_api_key)
+    with state_lock:
+        if state["status"] not in ("preparing", "training"):
+            raise HTTPException(400, f"No active job to cancel (status: {state['status']})")
+        state["_cancel"] = True
+        proc = state.get("_proc")
+        if proc and proc.poll() is None:
+            logger.info("Terminating subprocess (pid=%d)", proc.pid)
+            proc.terminate()
+    logger.info("Cancel requested from %s", request.client.host)
+    return {"message": "Cancel requested"}
 
 
 @app.get("/model/latest")
