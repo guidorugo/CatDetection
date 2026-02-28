@@ -80,5 +80,9 @@ async def training_page(request: Request):
             "request": request,
             "active_page": "training",
             "remote_configured": remote_configured,
+            "server_ssh": settings.TRAINING_SERVER_SSH or "",
+            "server_port": settings.TRAINING_SERVER_PORT,
+            "server_dir": settings.TRAINING_SERVER_DIR,
+            "api_key": settings.TRAINING_API_KEY or "",
         }
     )
