@@ -9,6 +9,7 @@ if [ -f /root/.ssh-mount/id_ed25519 ]; then
     cp /root/.ssh-mount/id_ed25519 /root/.ssh/id_ed25519
     chmod 600 /root/.ssh/id_ed25519
     [ -f /root/.ssh-mount/known_hosts ] && cp /root/.ssh-mount/known_hosts /root/.ssh/known_hosts
+    echo -e "Host *\n  StrictHostKeyChecking accept-new" > /root/.ssh/config
     echo "SSH key configured"
 fi
 
