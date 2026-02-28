@@ -59,6 +59,42 @@ python scripts/train_identifier.py --epochs 50
 python scripts/export_model.py models/identification/cat_reid_*.pth
 ```
 
+## Two-Machine Training (Server + Jetson)
+
+If you have a separate server with a more powerful GPU (e.g., RTX 2080Ti), you can train on the server while the Jetson keeps running detection. PyTorch `.pth` models are portable between x86_64 and ARM64.
+
+### Server Setup (one-time)
+
+```bash
+# Clone the repo on the server
+git clone <repo-url> && cd cat-detection-project
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# Set up SSH key auth to Jetson
+ssh-copy-id user@jetson-ip
+```
+
+### Workflow
+
+```bash
+# On the Jetson: prepare training data (YOLO crops raw images)
+python scripts/prepare_data.py --data-dir data --output-dir data/processed
+
+# On the server: sync data, train, deploy
+export JETSON_HOST=user@jetson-ip
+export AUTH_TOKEN=<your-jwt-token>
+./scripts/sync_and_train.sh
+```
+
+The script:
+1. Pulls `data/processed/` from Jetson (cropped 256x256 JPEGs, not raw images)
+2. Trains the model on the server GPU
+3. Pushes the model + registry back to Jetson
+4. Calls `POST /api/v1/training/reload-model` to hot-swap the model
+
+Detection continues running on the Jetson throughout. The reload pauses the pipeline for ~2 seconds while loading the new `.pth` file.
+
 ## Architecture
 
 ```
@@ -78,6 +114,7 @@ Camera (RTSP/MJPEG) → FrameGrabber (threaded) → DetectionPipeline (async)
 - `GET /api/v1/events` — Detection events (filterable, paginated)
 - `GET /api/v1/recordings` — Recording management
 - `POST /api/v1/training/start` — Start model training
+- `POST /api/v1/training/reload-model` — Hot-reload identifier model from disk
 - `WS /api/v1/ws/live/{camera_id}` — Live camera stream
 - `WS /api/v1/ws/events` — Real-time event notifications
 
