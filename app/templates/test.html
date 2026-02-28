@@ -43,6 +43,22 @@
     }
     .detection-item h4 { margin: 0 0 4px 0; }
     .detection-item p { margin: 2px 0; font-size: 0.9em; color: var(--text-muted); }
+    .detection-item .feedback-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 8px;
+    }
+    .detection-item .feedback-row select {
+        flex: 1;
+        padding: 4px 8px;
+        font-size: 0.85em;
+    }
+    .detection-item .feedback-saved {
+        color: var(--success, #28a745);
+        font-size: 0.85em;
+        margin-top: 6px;
+    }
     .no-results {
         color: var(--text-muted);
         text-align: center;
@@ -83,6 +99,15 @@
 {% block scripts %}
 <script>
 const COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+let knownCats = [];
+let lastFile = null;
+let lastDetections = [];
+
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        knownCats = await apiFetch('/api/v1/cats');
+    } catch (e) { console.error('Failed to load cats:', e); }
+});
 
 async function analyzeImage(e) {
     e.preventDefault();
@@ -108,6 +133,8 @@ async function analyzeImage(e) {
             throw new Error(err.detail || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        lastFile = file;
+        lastDetections = data.detections;
         showResults(file, data.detections);
     } catch (err) {
         alert('Analysis failed: ' + err.message);
@@ -135,44 +162,93 @@ function showResults(file, detections) {
                 ? `${det.cat_name} (${Math.round(det.similarity * 100)}%)`
                 : `Unknown (${Math.round(det.confidence * 100)}%)`;
 
-            // Draw bounding box
             ctx.strokeStyle = color;
             ctx.lineWidth = Math.max(2, Math.round(img.width / 400));
             ctx.strokeRect(x, y, w, h);
 
-            // Draw label background
             ctx.font = `bold ${Math.max(14, Math.round(img.width / 50))}px sans-serif`;
             const textWidth = ctx.measureText(label).width;
             const textHeight = Math.max(18, Math.round(img.width / 40));
             ctx.fillStyle = color;
             ctx.fillRect(x, y - textHeight - 4, textWidth + 8, textHeight + 4);
 
-            // Draw label text
             ctx.fillStyle = '#fff';
             ctx.fillText(label, x + 4, y - 6);
         });
     };
     img.src = URL.createObjectURL(file);
 
-    // Build detection list
     const list = document.getElementById('detectionList');
     if (detections.length === 0) {
         list.innerHTML = '<div class="no-results">No cats detected in this image.</div>';
         return;
     }
 
+    const catOptions = knownCats.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+
     list.innerHTML = detections.map((det, i) => {
         const color = COLORS[i % COLORS.length];
         const name = det.cat_name || 'Unknown';
         const simPct = Math.round(det.similarity * 100);
         const confPct = Math.round(det.confidence * 100);
+        const selectedId = det.cat_id || '';
         return `
-        <div class="detection-item">
+        <div class="detection-item" id="det-${i}">
             <h4><span class="color-dot" style="background:${color}"></span>${name}</h4>
             <p>Confidence: ${confPct}%</p>
             ${det.cat_id ? `<p>Similarity: ${simPct}%</p>` : '<p>No match in database</p>'}
+            <div class="feedback-row">
+                <select id="feedback-cat-${i}">
+                    <option value="">-- Correct ID --</option>
+                    ${catOptions}
+                </select>
+                <button class="btn btn-sm btn-primary" onclick="submitFeedback(${i})">Save</button>
+            </div>
         </div>`;
     }).join('');
+
+    // Pre-select identified cats
+    detections.forEach((det, i) => {
+        if (det.cat_id) {
+            document.getElementById(`feedback-cat-${i}`).value = det.cat_id;
+        }
+    });
+}
+
+async function submitFeedback(index) {
+    const det = lastDetections[index];
+    const select = document.getElementById(`feedback-cat-${index}`);
+    const catId = select.value;
+    if (!catId) { alert('Select a cat first'); return; }
+
+    const [bx, by, bw, bh] = det.bbox;
+    const formData = new FormData();
+    formData.append('file', lastFile);
+    formData.append('bbox_x', bx);
+    formData.append('bbox_y', by);
+    formData.append('bbox_w', bw);
+    formData.append('bbox_h', bh);
+    formData.append('cat_id', catId);
+
+    try {
+        const resp = await fetch('/api/v1/test/feedback', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + getToken() },
+            body: formData
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        const item = document.getElementById(`det-${index}`);
+        const existing = item.querySelector('.feedback-saved');
+        if (existing) existing.remove();
+        item.insertAdjacentHTML('beforeend',
+            `<p class="feedback-saved">Saved as ${data.cat_name}</p>`);
+    } catch (err) {
+        alert('Feedback failed: ' + err.message);
+    }
 }
 </script>
 {% endblock %}
