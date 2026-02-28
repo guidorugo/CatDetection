@@ -9,6 +9,7 @@ class TrainingStart(BaseModel):
     batch_size: int = 24
     freeze_epochs: int = 10
     prepare_data: bool = True
+    training_location: str = "local"  # "local" or "remote"
 
 
 class TrainingJobResponse(BaseModel):

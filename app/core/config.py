@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     THUMBNAILS_DIR: Path = Path("./thumbnails")
     DATA_DIR: Path = Path("./data")
 
+    # Remote Training
+    TRAINING_SERVER_SSH: str | None = None    # e.g. "user@192.168.1.200"
+    TRAINING_SERVER_PORT: int = 8001
+    TRAINING_API_KEY: str | None = None
+    TRAINING_SERVER_DIR: str = "~/cat-detection-project"
+
     # Admin
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "changeme"

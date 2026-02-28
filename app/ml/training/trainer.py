@@ -64,6 +64,12 @@ class CatReIDTrainer:
         self.freeze_epochs = freeze_epochs
         self.margin = margin
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._cancel = False
+
+    def cancel(self):
+        """Request cancellation of the current training run."""
+        self._cancel = True
+        logger.info("Training cancellation requested")
 
     def train(self, progress_callback=None) -> dict:
         """Run the full training pipeline. Returns training results dict."""
@@ -116,6 +122,10 @@ class CatReIDTrainer:
         self._freeze_backbone(model)
 
         for epoch in range(1, self.epochs + 1):
+            if self._cancel:
+                logger.info("Training cancelled at epoch %d", epoch)
+                break
+
             # Phase 2: Unfreeze last 2 blocks after freeze_epochs
             if epoch == self.freeze_epochs + 1:
                 self._unfreeze_last_blocks(model, num_blocks=2)

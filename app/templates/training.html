@@ -10,6 +10,21 @@
 <div id="trainForm" class="form-card" style="display:none">
     <h3>Start Training Job</h3>
     <form onsubmit="startTraining(event)">
+        <div class="form-group" style="margin-bottom:16px">
+            <label>Training Location</label>
+            <div style="display:flex; gap:16px; margin-top:4px">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+                    <input type="radio" name="trainLocation" value="local" checked style="width:auto">
+                    <span>Train locally</span>
+                </label>
+                {% if remote_configured %}
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+                    <input type="radio" name="trainLocation" value="remote" style="width:auto">
+                    <span>Train on remote server</span>
+                </label>
+                {% endif %}
+            </div>
+        </div>
         <div class="form-row">
             <div class="form-group">
                 <label>Epochs</label>
@@ -46,6 +61,8 @@
 
 {% block scripts %}
 <script>
+let pollTimer = null;
+
 document.addEventListener('DOMContentLoaded', loadJobs);
 
 async function loadJobs() {
@@ -53,21 +70,58 @@ async function loadJobs() {
     const list = document.getElementById('jobList');
     if (jobs.length === 0) {
         list.innerHTML = '<p class="empty-state">No training jobs.</p>';
+        stopPolling();
         return;
     }
-    list.innerHTML = jobs.map(job => `
+
+    let hasActive = false;
+    list.innerHTML = jobs.map(job => {
+        const isActive = job.status === 'running' || job.status === 'pending';
+        if (isActive) hasActive = true;
+        const pct = job.epochs_total > 0 ? Math.round((job.epochs_completed / job.epochs_total) * 100) : 0;
+        const progressBar = isActive ? `
+            <div class="progress-bar">
+                <div class="progress-fill" style="width:${pct}%"></div>
+            </div>
+            <span class="progress-text">${pct}% (${job.epochs_completed}/${job.epochs_total} epochs)</span>
+        ` : '';
+        const cancelBtn = isActive ? `
+            <button class="btn btn-danger btn-sm" onclick="cancelJob(${job.id})">Cancel</button>
+        ` : '';
+        return `
         <div class="list-card">
-            <div class="list-card-info">
+            <div class="list-card-info" style="flex:1">
                 <h3>${job.model_type} - v${job.model_version || 'pending'}</h3>
                 <p>Epochs: ${job.epochs_completed}/${job.epochs_total} | Best: ${job.best_metric ? job.best_metric.toFixed(4) : 'N/A'}</p>
                 <p class="meta">Started: ${new Date(job.created_at).toLocaleString()}</p>
                 ${job.error_message ? `<p class="error-text">${job.error_message}</p>` : ''}
+                ${progressBar}
             </div>
             <div class="list-card-actions">
+                ${cancelBtn}
                 <span class="status-badge status-${job.status}">${job.status}</span>
             </div>
         </div>
-    `).join('');
+        `;
+    }).join('');
+
+    if (hasActive) {
+        startPolling();
+    } else {
+        stopPolling();
+    }
+}
+
+function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(loadJobs, 5000);
+}
+
+function stopPolling() {
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
 }
 
 function showTrainForm() { document.getElementById('trainForm').style.display = 'block'; }
@@ -75,6 +129,7 @@ function hideTrainForm() { document.getElementById('trainForm').style.display = 
 
 async function startTraining(e) {
     e.preventDefault();
+    const location = document.querySelector('input[name="trainLocation"]:checked').value;
     try {
         await apiFetch('/api/v1/training/start', {
             method: 'POST',
@@ -83,12 +138,23 @@ async function startTraining(e) {
                 learning_rate: parseFloat(document.getElementById('trainLR').value),
                 freeze_epochs: parseInt(document.getElementById('trainFreeze').value),
                 prepare_data: document.getElementById('trainPrepare').checked,
+                training_location: location,
             })
         });
         hideTrainForm();
         loadJobs();
     } catch (e) {
         alert('Failed to start training: ' + e.message);
+    }
+}
+
+async function cancelJob(jobId) {
+    if (!confirm('Cancel this training job?')) return;
+    try {
+        await apiFetch(`/api/v1/training/jobs/${jobId}/cancel`, { method: 'POST' });
+        loadJobs();
+    } catch (e) {
+        alert('Failed to cancel: ' + e.message);
     }
 }
 </script>

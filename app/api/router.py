@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.api.v1 import auth, cameras, cats, events, recordings, training, ws
+from app.core.config import settings
 
 api_router = APIRouter()
 
@@ -73,6 +74,11 @@ async def recordings_page(request: Request):
 
 @page_router.get("/training")
 async def training_page(request: Request):
+    remote_configured = bool(settings.TRAINING_SERVER_SSH and settings.TRAINING_API_KEY)
     return templates.TemplateResponse(
-        "training.html", {"request": request, "active_page": "training"}
+        "training.html", {
+            "request": request,
+            "active_page": "training",
+            "remote_configured": remote_configured,
+        }
     )
