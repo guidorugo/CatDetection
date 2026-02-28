@@ -8,6 +8,7 @@ class TrainingStart(BaseModel):
     learning_rate: float = 0.001
     batch_size: int = 24
     freeze_epochs: int = 10
+    prepare_data: bool = True
 
 
 class TrainingJobResponse(BaseModel):
