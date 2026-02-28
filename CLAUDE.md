@@ -63,14 +63,27 @@
 ## Test Page
 
 - `POST /api/v1/test/detect` — upload a photo, detect cats (YOLO) + identify each (ResNet Re-ID + embedding matching), returns JSON with bounding boxes, confidence, cat names, and similarity scores
+- `POST /api/v1/test/feedback` — submit identity correction: crops image at bbox, generates embedding, stores as reference for the specified cat
 - Handles multiple cats per image; each detection is independently identified
 - UI at `/test` draws bounding boxes on a canvas with color-coded labels
+- Each detection shows a dropdown to correct the cat identity + Save button
 
 ## Model Management
 
 - `GET /api/v1/models` — list all registered model versions with metrics and active status
 - `POST /api/v1/models/{version}/activate` — activate a model version and hot-reload it into the pipeline (rebuilds embedding store)
 - Training page includes a "Models" section showing all versions with an "Activate" button
+
+## Cat Image Management
+
+- Reference images stored in `data/{cat_name}/` (case-insensitive directory lookup)
+- `GET /api/v1/cats/{id}/images` — list reference images (jpg/jpeg/png)
+- `POST /api/v1/cats/{id}/images` — upload one or more reference images (multipart, multiple files)
+- `GET /api/v1/cats/{id}/images/{filename}` — serve individual image
+- `DELETE /api/v1/cats/{id}/images/{filename}` — delete individual image
+- `POST /api/v1/cats/generate-embeddings` — generate reference embeddings from training data images (auto-triggered after training)
+- Cats page shows thumbnail grid per cat with upload (+) button, lightbox preview, and per-image delete
+- `_find_cat_dir()` helper handles case-insensitive directory matching (DB names are capitalized, data dirs are lowercase)
 
 ## API Pagination
 

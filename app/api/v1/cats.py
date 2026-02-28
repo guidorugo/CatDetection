@@ -2,10 +2,10 @@ import asyncio
 import random
 import shutil
 from pathlib import Path
-
 import cv2
 import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -120,6 +120,149 @@ async def upload_profile_image(
     return cat
 
 
+@router.get("/{cat_id}/profile-image")
+async def get_profile_image(
+    cat_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Cat).where(Cat.id == cat_id))
+    cat = result.scalar_one_or_none()
+    if not cat or not cat.profile_image_path:
+        raise HTTPException(status_code=404, detail="Profile image not found")
+    path = Path(cat.profile_image_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Profile image file missing")
+    return FileResponse(str(path))
+
+
+def _find_cat_dir(cat_name: str) -> Path:
+    """Find the data directory for a cat (case-insensitive)."""
+    cat_dir = Path(settings.DATA_DIR) / cat_name
+    if cat_dir.is_dir():
+        return cat_dir
+    # Case-insensitive fallback
+    data_root = Path(settings.DATA_DIR)
+    if data_root.is_dir():
+        for d in data_root.iterdir():
+            if d.is_dir() and d.name.lower() == cat_name.lower():
+                return d
+    return Path(settings.DATA_DIR) / cat_name.lower()
+
+
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+
+
+@router.get("/{cat_id}/images")
+async def list_cat_images(
+    cat_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """List all reference images for a cat."""
+    result = await db.execute(select(Cat).where(Cat.id == cat_id))
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Cat not found")
+
+    cat_dir = _find_cat_dir(cat.name)
+    if not cat_dir.is_dir():
+        return {"images": []}
+
+    images = sorted(
+        f.name for f in cat_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS
+    )
+    return {"images": images}
+
+
+@router.post("/{cat_id}/images")
+async def upload_cat_images(
+    cat_id: int,
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Upload one or more reference images for a cat."""
+    result = await db.execute(select(Cat).where(Cat.id == cat_id))
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Cat not found")
+
+    cat_dir = _find_cat_dir(cat.name)
+    cat_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    for file in files:
+        ext = Path(file.filename).suffix.lower() if file.filename else ".jpg"
+        if ext not in ALLOWED_IMAGE_EXTENSIONS:
+            continue
+        # Use original filename, avoid overwriting by appending suffix if needed
+        filename = Path(file.filename).name if file.filename else f"upload{ext}"
+        dest = cat_dir / filename
+        counter = 1
+        while dest.exists():
+            stem = Path(filename).stem
+            dest = cat_dir / f"{stem}_{counter}{ext}"
+            counter += 1
+
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        saved.append(dest.name)
+
+    logger.info("Uploaded %d images for cat '%s'", len(saved), cat.name)
+    return {"uploaded": saved}
+
+
+@router.get("/{cat_id}/images/{filename}")
+async def get_cat_image(
+    cat_id: int,
+    filename: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Serve a reference image for a cat."""
+    result = await db.execute(select(Cat).where(Cat.id == cat_id))
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Cat not found")
+
+    # Prevent path traversal
+    if ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    cat_dir = _find_cat_dir(cat.name)
+    file_path = cat_dir / filename
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(str(file_path))
+
+
+@router.delete("/{cat_id}/images/{filename}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_cat_image(
+    cat_id: int,
+    filename: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Delete a reference image for a cat."""
+    result = await db.execute(select(Cat).where(Cat.id == cat_id))
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Cat not found")
+
+    if ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    cat_dir = _find_cat_dir(cat.name)
+    file_path = cat_dir / filename
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    file_path.unlink()
+    logger.info("Deleted image '%s' for cat '%s'", filename, cat.name)
+
+
 @router.get("/{cat_id}/events", response_model=list[EventResponse])
 async def get_cat_events(
     cat_id: int,
@@ -156,16 +299,8 @@ async def generate_embeddings(detector, identifier, embedding_store, db: AsyncSe
 
     summary = {}
     for cat in cats:
-        # Find images in data/{cat_name}/ (case-insensitive match)
-        cat_dir = Path(settings.DATA_DIR) / cat.name
+        cat_dir = _find_cat_dir(cat.name)
         if not cat_dir.is_dir():
-            # Try case-insensitive match
-            cat_dir = None
-            for d in Path(settings.DATA_DIR).iterdir():
-                if d.is_dir() and d.name.lower() == cat.name.lower():
-                    cat_dir = d
-                    break
-        if not cat_dir or not cat_dir.is_dir():
             logger.warning("No data directory for cat '%s'", cat.name)
             summary[cat.name] = 0
             continue
