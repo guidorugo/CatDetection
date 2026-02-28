@@ -63,10 +63,10 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
 
     pipeline = getattr(app.state, "detection_pipeline", None)
 
-    server_ssh = settings.TRAINING_SERVER_SSH
-    server_port = settings.TRAINING_SERVER_PORT
-    api_key = settings.TRAINING_API_KEY
-    server_dir = settings.TRAINING_SERVER_DIR
+    server_ssh = data.server_ssh or settings.TRAINING_SERVER_SSH
+    server_port = data.server_port or settings.TRAINING_SERVER_PORT
+    api_key = data.api_key or settings.TRAINING_API_KEY
+    server_dir = data.server_dir or settings.TRAINING_SERVER_DIR
     base_url = f"http://{server_ssh.split('@')[-1]}:{server_port}"
 
     # Update job to running
@@ -370,10 +370,12 @@ async def start_training(
 
     # Launch training in background
     if data.training_location == "remote":
-        if not settings.TRAINING_SERVER_SSH or not settings.TRAINING_API_KEY:
+        server_ssh = data.server_ssh or settings.TRAINING_SERVER_SSH
+        api_key = data.api_key or settings.TRAINING_API_KEY
+        if not server_ssh or not api_key:
             raise HTTPException(
                 status_code=400,
-                detail="Remote training not configured (TRAINING_SERVER_SSH and TRAINING_API_KEY required)",
+                detail="Remote training not configured (server SSH and API key required)",
             )
         asyncio.create_task(_run_remote_training_job(job.id, data, request.app))
         logger.info("Remote training job %d started (epochs=%d)", job.id, data.epochs)

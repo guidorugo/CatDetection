@@ -15,15 +15,45 @@
             <small style="color:var(--text-muted)">Where to run the training job</small>
             <div style="display:flex; gap:16px; margin-top:4px">
                 <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
-                    <input type="radio" name="trainLocation" value="local" checked style="width:auto">
+                    <input type="radio" name="trainLocation" value="local" checked style="width:auto" onchange="toggleRemoteSettings()">
                     <span>Train locally</span>
                 </label>
-                {% if remote_configured %}
                 <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
-                    <input type="radio" name="trainLocation" value="remote" style="width:auto">
+                    <input type="radio" name="trainLocation" value="remote" style="width:auto" onchange="toggleRemoteSettings()">
                     <span>Train on remote server</span>
                 </label>
-                {% endif %}
+            </div>
+        </div>
+        <div id="remoteSettings" style="display:none; border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px; background:var(--bg-secondary, #f8f9fa)">
+            <h4 style="margin-top:0; margin-bottom:12px">Remote Server Settings</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Server SSH</label>
+                    <input type="text" id="remoteSSH" value="{{ server_ssh }}" placeholder="user@10.0.0.82" oninput="updateServerHost()">
+                    <small style="color:var(--text-muted)">SSH target for rsync (user@host)</small>
+                </div>
+                <div class="form-group">
+                    <label>Server Host</label>
+                    <input type="text" id="remoteHost" readonly style="background:var(--bg-tertiary, #e9ecef); cursor:default">
+                    <small style="color:var(--text-muted)">Auto-derived from SSH field</small>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Server Port</label>
+                    <input type="number" id="remotePort" value="{{ server_port }}" min="1" max="65535">
+                    <small style="color:var(--text-muted)">Training server API port</small>
+                </div>
+                <div class="form-group">
+                    <label>Server Directory</label>
+                    <input type="text" id="remoteDir" value="{{ server_dir }}" placeholder="~/cat-detection-project">
+                    <small style="color:var(--text-muted)">Project directory on remote server</small>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="remoteAPIKey" value="{{ api_key }}" placeholder="shared secret">
+                <small style="color:var(--text-muted)">Shared TRAINING_API_KEY for server auth</small>
             </div>
         </div>
         <div class="form-row">
@@ -128,22 +158,48 @@ function stopPolling() {
     }
 }
 
-function showTrainForm() { document.getElementById('trainForm').style.display = 'block'; }
+function showTrainForm() {
+    document.getElementById('trainForm').style.display = 'block';
+    toggleRemoteSettings();
+    updateServerHost();
+}
 function hideTrainForm() { document.getElementById('trainForm').style.display = 'none'; }
+
+function toggleRemoteSettings() {
+    const location = document.querySelector('input[name="trainLocation"]:checked').value;
+    document.getElementById('remoteSettings').style.display = location === 'remote' ? 'block' : 'none';
+}
+
+function updateServerHost() {
+    const ssh = document.getElementById('remoteSSH').value;
+    const host = ssh.includes('@') ? ssh.split('@').pop() : ssh;
+    document.getElementById('remoteHost').value = host;
+}
 
 async function startTraining(e) {
     e.preventDefault();
     const location = document.querySelector('input[name="trainLocation"]:checked').value;
+    const body = {
+        epochs: parseInt(document.getElementById('trainEpochs').value),
+        learning_rate: parseFloat(document.getElementById('trainLR').value),
+        freeze_epochs: parseInt(document.getElementById('trainFreeze').value),
+        prepare_data: document.getElementById('trainPrepare').checked,
+        training_location: location,
+    };
+    if (location === 'remote') {
+        const ssh = document.getElementById('remoteSSH').value.trim();
+        const port = parseInt(document.getElementById('remotePort').value);
+        const dir = document.getElementById('remoteDir').value.trim();
+        const key = document.getElementById('remoteAPIKey').value.trim();
+        if (ssh) body.server_ssh = ssh;
+        if (port) body.server_port = port;
+        if (dir) body.server_dir = dir;
+        if (key) body.api_key = key;
+    }
     try {
         await apiFetch('/api/v1/training/start', {
             method: 'POST',
-            body: JSON.stringify({
-                epochs: parseInt(document.getElementById('trainEpochs').value),
-                learning_rate: parseFloat(document.getElementById('trainLR').value),
-                freeze_epochs: parseInt(document.getElementById('trainFreeze').value),
-                prepare_data: document.getElementById('trainPrepare').checked,
-                training_location: location,
-            })
+            body: JSON.stringify(body)
         });
         hideTrainForm();
         loadJobs();
