@@ -101,6 +101,13 @@ async def lifespan(app: FastAPI):
         app.state.health_monitor = health_monitor
         app.state.embedding_store = embedding_store
         app.state.model_registry = model_registry
+        app.state.detector = detector
+        app.state.identifier = identifier
+
+        # Resume any orphaned remote training jobs
+        from app.api.v1.training import resume_orphaned_jobs
+
+        await resume_orphaned_jobs(app)
 
         yield
 
