@@ -1,6 +1,90 @@
 {% extends "base.html" %}
 {% block title %}Cats - CatDetect{% endblock %}
 
+{% block head %}
+<style>
+    .cat-card { position: relative; }
+    .cat-images-section {
+        margin-top: 12px;
+        border-top: 1px solid var(--border);
+        padding-top: 12px;
+    }
+    .cat-images-section h4 {
+        margin: 0 0 8px 0;
+        font-size: 0.9em;
+        color: var(--text-muted);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .image-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+        gap: 6px;
+    }
+    .image-thumb {
+        position: relative;
+        aspect-ratio: 1;
+        border-radius: 6px;
+        overflow: hidden;
+        cursor: pointer;
+        border: 1px solid var(--border);
+    }
+    .image-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    .image-thumb .delete-btn {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        background: rgba(220, 53, 69, 0.85);
+        color: #fff;
+        border: none;
+        border-radius: 50%;
+        width: 20px;
+        height: 20px;
+        font-size: 12px;
+        line-height: 20px;
+        text-align: center;
+        cursor: pointer;
+        display: none;
+        padding: 0;
+    }
+    .image-thumb:hover .delete-btn { display: block; }
+    .upload-thumb {
+        aspect-ratio: 1;
+        border-radius: 6px;
+        border: 2px dashed var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        color: var(--text-muted);
+        font-size: 1.5em;
+        transition: border-color 0.2s;
+    }
+    .upload-thumb:hover { border-color: var(--primary); color: var(--primary); }
+    .image-count { font-size: 0.8em; color: var(--text-muted); }
+    .image-lightbox {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.85);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+        cursor: pointer;
+    }
+    .image-lightbox img {
+        max-width: 90%;
+        max-height: 90%;
+        border-radius: 8px;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="page-header">
     <h1>Cat Profiles</h1>
@@ -44,7 +128,7 @@ async function loadCats() {
         return;
     }
     grid.innerHTML = cats.map(cat => `
-        <div class="cat-card">
+        <div class="cat-card" id="cat-card-${cat.id}">
             <div class="cat-avatar">${cat.profile_image_path ?
                 `<img src="/api/v1/cats/${cat.id}/profile-image" alt="${cat.name}">` :
                 `<div class="cat-initial">${cat.name[0].toUpperCase()}</div>`}</div>
@@ -54,8 +138,91 @@ async function loadCats() {
                 <a href="/events?cat_id=${cat.id}" class="btn btn-sm">Events</a>
                 <button class="btn btn-sm btn-danger" onclick="deleteCat(${cat.id})">Delete</button>
             </div>
+            <div class="cat-images-section">
+                <h4>
+                    <span>Reference Images <span class="image-count" id="img-count-${cat.id}"></span></span>
+                </h4>
+                <div class="image-grid" id="img-grid-${cat.id}">
+                    <div class="upload-thumb" onclick="triggerUpload(${cat.id})" title="Upload images">+</div>
+                </div>
+                <input type="file" id="img-upload-${cat.id}" multiple accept="image/jpeg,image/png"
+                       style="display:none" onchange="uploadImages(${cat.id}, this)">
+            </div>
         </div>
     `).join('');
+
+    // Load images for each cat
+    cats.forEach(cat => loadCatImages(cat.id));
+}
+
+async function loadCatImages(catId) {
+    try {
+        const data = await apiFetch(`/api/v1/cats/${catId}/images`);
+        const grid = document.getElementById(`img-grid-${catId}`);
+        const count = document.getElementById(`img-count-${catId}`);
+        if (!grid) return;
+
+        count.textContent = `(${data.images.length})`;
+
+        const thumbs = data.images.map(name => `
+            <div class="image-thumb" onclick="showLightbox(${catId}, '${name}')">
+                <img src="/api/v1/cats/${catId}/images/${encodeURIComponent(name)}" alt="${name}" loading="lazy">
+                <button class="delete-btn" onclick="event.stopPropagation(); deleteImage(${catId}, '${name}')">&times;</button>
+            </div>
+        `).join('');
+
+        // Keep the upload button at the end
+        grid.innerHTML = thumbs + `<div class="upload-thumb" onclick="triggerUpload(${catId})" title="Upload images">+</div>`;
+    } catch (e) {
+        console.error('Failed to load images for cat', catId, e);
+    }
+}
+
+function triggerUpload(catId) {
+    document.getElementById(`img-upload-${catId}`).click();
+}
+
+async function uploadImages(catId, input) {
+    const files = input.files;
+    if (!files.length) return;
+
+    const formData = new FormData();
+    for (const file of files) {
+        formData.append('files', file);
+    }
+
+    try {
+        await fetch(`/api/v1/cats/${catId}/images`, {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + getToken() },
+            body: formData
+        }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+        loadCatImages(catId);
+    } catch (e) {
+        alert('Upload failed: ' + e.message);
+    }
+    input.value = '';
+}
+
+async function deleteImage(catId, filename) {
+    if (!confirm('Delete this image?')) return;
+    try {
+        await fetch(`/api/v1/cats/${catId}/images/${encodeURIComponent(filename)}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + getToken() }
+        }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); });
+        loadCatImages(catId);
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
+}
+
+function showLightbox(catId, filename) {
+    const overlay = document.createElement('div');
+    overlay.className = 'image-lightbox';
+    overlay.onclick = () => overlay.remove();
+    overlay.innerHTML = `<img src="/api/v1/cats/${catId}/images/${encodeURIComponent(filename)}" alt="${filename}">`;
+    document.body.appendChild(overlay);
 }
 
 function showAddCat() { document.getElementById('addCatForm').style.display = 'block'; }

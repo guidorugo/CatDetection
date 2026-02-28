@@ -19,7 +19,10 @@ A web-based service that ingests live video from IoT cameras (ESP32/RTSP), detec
 - Training pipeline for custom cat identification (local or remote GPU server)
 - Training job cancellation and live progress tracking
 - Test page — upload a photo to detect and identify cats with bounding box visualization
+- Detection feedback — correct cat identifications from the test page to improve matching
 - Model management — list trained models, switch active version with hot-reload
+- Cat image management — upload, view, and delete reference images per cat
+- Automatic reference embedding generation from training data
 - Automatic resume of orphaned remote training jobs after restart
 
 ## Quick Start (Local Development)
@@ -173,6 +176,11 @@ Camera (RTSP/MJPEG) → FrameGrabber (threaded) → DetectionPipeline (async)
 - `POST /api/v1/training/jobs/{id}/cancel` — Cancel a running training job
 - `POST /api/v1/training/reload-model` — Hot-reload identifier model from disk
 - `POST /api/v1/test/detect` — Upload a photo, detect and identify cats
+- `POST /api/v1/test/feedback` — Submit identity correction for a detection
+- `GET /api/v1/cats/{id}/images` — List reference images for a cat
+- `POST /api/v1/cats/{id}/images` — Upload reference images for a cat
+- `DELETE /api/v1/cats/{id}/images/{filename}` — Delete a reference image
+- `POST /api/v1/cats/generate-embeddings` — Generate reference embeddings from training data
 - `GET /api/v1/models` — List registered model versions
 - `POST /api/v1/models/{version}/activate` — Switch active model with hot-reload
 - `WS /api/v1/ws/live/{camera_id}` — Live camera stream
