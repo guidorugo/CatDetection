@@ -100,7 +100,7 @@ async function analyzeImage(e) {
 
         const resp = await fetch('/api/v1/test/detect', {
             method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+            headers: { 'Authorization': 'Bearer ' + getToken() },
             body: formData
         });
         if (!resp.ok) {
