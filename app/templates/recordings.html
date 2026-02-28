@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Recordings - CatDetect{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Recordings</h1>
+</div>
+
+<div class="recording-list" id="recordingList">
+    <p class="empty-state">Loading...</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', loadRecordings);
+
+async function loadRecordings() {
+    const recordings = await apiFetch('/api/v1/recordings?limit=50');
+    const list = document.getElementById('recordingList');
+    if (recordings.length === 0) {
+        list.innerHTML = '<p class="empty-state">No recordings yet.</p>';
+        return;
+    }
+    list.innerHTML = recordings.map(rec => `
+        <div class="list-card">
+            <div class="list-card-info">
+                <h3>Camera ${rec.camera_id} - ${new Date(rec.start_time).toLocaleString()}</h3>
+                <p class="meta">Duration: ${rec.duration ? rec.duration.toFixed(1) + 's' : 'N/A'} | Size: ${rec.file_size ? (rec.file_size / 1024 / 1024).toFixed(1) + ' MB' : 'N/A'} | ${rec.status}</p>
+            </div>
+            <div class="list-card-actions">
+                <span class="status-badge status-${rec.status}">${rec.status}</span>
+                ${rec.status === 'completed' ? `
+                    <button class="btn btn-sm" onclick="playRecording(${rec.id})">Play</button>
+                    <a href="/api/v1/recordings/${rec.id}/download" class="btn btn-sm">Download</a>
+                ` : ''}
+                <button class="btn btn-sm btn-danger" onclick="deleteRecording(${rec.id})">Delete</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function playRecording(id) {
+    const token = localStorage.getItem('access_token');
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Recording Playback</h3>
+                <button onclick="this.closest('.modal-overlay').remove()">&times;</button>
+            </div>
+            <video controls autoplay style="width:100%;max-height:70vh">
+                <source src="/api/v1/recordings/${id}/stream" type="video/mp4">
+            </video>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+async function deleteRecording(id) {
+    if (!confirm('Delete this recording?')) return;
+    await apiFetch(`/api/v1/recordings/${id}`, {method: 'DELETE'});
+    loadRecordings();
+}
+</script>
+{% endblock %}

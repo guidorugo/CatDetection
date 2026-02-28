@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Training - CatDetect{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Model Training</h1>
+    <button class="btn btn-primary" onclick="showTrainForm()">Start Training</button>
+</div>
+
+<div id="trainForm" class="form-card" style="display:none">
+    <h3>Start Training Job</h3>
+    <form onsubmit="startTraining(event)">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Epochs</label>
+                <input type="number" id="trainEpochs" value="50" min="1" max="500">
+            </div>
+            <div class="form-group">
+                <label>Learning Rate</label>
+                <input type="number" id="trainLR" value="0.001" step="0.0001" min="0.00001">
+            </div>
+            <div class="form-group">
+                <label>Freeze Epochs</label>
+                <input type="number" id="trainFreeze" value="10" min="0">
+            </div>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Start</button>
+            <button type="button" class="btn btn-secondary" onclick="hideTrainForm()">Cancel</button>
+        </div>
+        <p class="form-note">Note: Detection pipeline will be paused during training to conserve GPU memory.</p>
+    </form>
+</div>
+
+<div class="section">
+    <h2>Training Jobs</h2>
+    <div id="jobList">
+        <p class="empty-state">Loading...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', loadJobs);
+
+async function loadJobs() {
+    const jobs = await apiFetch('/api/v1/training/jobs');
+    const list = document.getElementById('jobList');
+    if (jobs.length === 0) {
+        list.innerHTML = '<p class="empty-state">No training jobs.</p>';
+        return;
+    }
+    list.innerHTML = jobs.map(job => `
+        <div class="list-card">
+            <div class="list-card-info">
+                <h3>${job.model_type} - v${job.model_version || 'pending'}</h3>
+                <p>Epochs: ${job.epochs_completed}/${job.epochs_total} | Best: ${job.best_metric ? job.best_metric.toFixed(4) : 'N/A'}</p>
+                <p class="meta">Started: ${new Date(job.created_at).toLocaleString()}</p>
+                ${job.error_message ? `<p class="error-text">${job.error_message}</p>` : ''}
+            </div>
+            <div class="list-card-actions">
+                <span class="status-badge status-${job.status}">${job.status}</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showTrainForm() { document.getElementById('trainForm').style.display = 'block'; }
+function hideTrainForm() { document.getElementById('trainForm').style.display = 'none'; }
+
+async function startTraining(e) {
+    e.preventDefault();
+    try {
+        await apiFetch('/api/v1/training/start', {
+            method: 'POST',
+            body: JSON.stringify({
+                epochs: parseInt(document.getElementById('trainEpochs').value),
+                learning_rate: parseFloat(document.getElementById('trainLR').value),
+                freeze_epochs: parseInt(document.getElementById('trainFreeze').value),
+            })
+        });
+        hideTrainForm();
+        loadJobs();
+    } catch (e) {
+        alert('Failed to start training: ' + e.message);
+    }
+}
+</script>
+{% endblock %}

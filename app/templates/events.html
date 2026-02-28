@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Events - CatDetect{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Detection Events</h1>
+</div>
+
+<div class="filter-bar">
+    <select id="filterCamera" onchange="loadEvents()">
+        <option value="">All Cameras</option>
+    </select>
+    <select id="filterCat" onchange="loadEvents()">
+        <option value="">All Cats</option>
+    </select>
+    <button class="btn btn-sm" onclick="loadEvents()">Refresh</button>
+</div>
+
+<div class="event-list" id="eventList">
+    <p class="empty-state">Loading...</p>
+</div>
+
+<div class="pagination" id="pagination"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/events.js"></script>
+<script>
+let currentOffset = 0;
+const PAGE_SIZE = 50;
+
+document.addEventListener('DOMContentLoaded', async () => {
+    // Load filter options
+    const cameras = await apiFetch('/api/v1/cameras');
+    const camSelect = document.getElementById('filterCamera');
+    cameras.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.name;
+        camSelect.appendChild(opt);
+    });
+
+    const cats = await apiFetch('/api/v1/cats');
+    const catSelect = document.getElementById('filterCat');
+    cats.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.name;
+        catSelect.appendChild(opt);
+    });
+
+    // Check URL params
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('cat_id')) document.getElementById('filterCat').value = params.get('cat_id');
+    if (params.get('camera_id')) document.getElementById('filterCamera').value = params.get('camera_id');
+
+    loadEvents();
+});
+
+async function loadEvents() {
+    const cameraId = document.getElementById('filterCamera').value;
+    const catId = document.getElementById('filterCat').value;
+    let url = `/api/v1/events?limit=${PAGE_SIZE}&offset=${currentOffset}`;
+    if (cameraId) url += `&camera_id=${cameraId}`;
+    if (catId) url += `&cat_id=${catId}`;
+
+    const events = await apiFetch(url);
+    renderEventList(events, document.getElementById('eventList'));
+
+    // Pagination
+    const pag = document.getElementById('pagination');
+    pag.innerHTML = `
+        <button class="btn btn-sm" ${currentOffset === 0 ? 'disabled' : ''} onclick="prevPage()">Previous</button>
+        <span>Showing ${currentOffset + 1}-${currentOffset + events.length}</span>
+        <button class="btn btn-sm" ${events.length < PAGE_SIZE ? 'disabled' : ''} onclick="nextPage()">Next</button>
+    `;
+}
+
+function prevPage() { currentOffset = Math.max(0, currentOffset - PAGE_SIZE); loadEvents(); }
+function nextPage() { currentOffset += PAGE_SIZE; loadEvents(); }
+</script>
+{% endblock %}

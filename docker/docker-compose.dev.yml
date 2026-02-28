@@ -1,0 +1,23 @@
+services:
+  catdetect:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.jetson
+    runtime: nvidia
+    container_name: catdetect-dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ..:/app
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=sqlite+aiosqlite:///./catdetect.db
+      - SECRET_KEY=dev-secret-key-not-for-production
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

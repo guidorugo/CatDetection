@@ -1,0 +1,18 @@
+[project]
+name = "cat-detection"
+version = "0.1.0"
+description = "Cat detection & identification service for IoT cameras"
+requires-python = ">=3.10"
+license = "MIT"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

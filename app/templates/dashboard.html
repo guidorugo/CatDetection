@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - CatDetect{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <div class="stats-bar" id="statsBar">
+        <div class="stat-item">
+            <span class="stat-value" id="totalEvents">-</span>
+            <span class="stat-label">Total Events</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-value" id="todayEvents">-</span>
+            <span class="stat-label">Today</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-value" id="activeCameras">-</span>
+            <span class="stat-label">Active Cameras</span>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Live Cameras</h2>
+    <div class="camera-grid" id="cameraGrid">
+        <p class="empty-state">Loading cameras...</p>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Recent Events</h2>
+    <div class="event-list" id="recentEvents">
+        <p class="empty-state">Loading events...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/stream.js"></script>
+<script src="/static/js/events.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    loadDashboard();
+    connectEventStream();
+});
+
+async function loadDashboard() {
+    // Load stats
+    try {
+        const stats = await apiFetch('/api/v1/events/stats');
+        document.getElementById('totalEvents').textContent = stats.total_events;
+        document.getElementById('todayEvents').textContent = stats.events_today;
+    } catch (e) { console.error('Failed to load stats:', e); }
+
+    // Load cameras
+    try {
+        const cameras = await apiFetch('/api/v1/cameras');
+        const grid = document.getElementById('cameraGrid');
+        document.getElementById('activeCameras').textContent = cameras.filter(c => c.is_enabled).length;
+        if (cameras.length === 0) {
+            grid.innerHTML = '<p class="empty-state">No cameras configured. <a href="/cameras">Add a camera</a></p>';
+            return;
+        }
+        grid.innerHTML = cameras.map(cam => `
+            <div class="camera-card" id="cam-${cam.id}">
+                <div class="camera-header">
+                    <span class="camera-name">${cam.name}</span>
+                    <span class="camera-status status-${cam.is_enabled ? 'connected' : 'disabled'}">${cam.is_enabled ? 'Active' : 'Disabled'}</span>
+                </div>
+                <div class="camera-feed">
+                    <canvas id="canvas-${cam.id}" width="640" height="480"></canvas>
+                    <div class="no-feed" id="nofeed-${cam.id}">No feed available</div>
+                </div>
+                <div class="camera-footer">
+                    <span>${cam.location || ''}</span>
+                    <span class="fps-display" id="fps-${cam.id}">-- FPS</span>
+                </div>
+            </div>
+        `).join('');
+
+        // Connect live streams
+        cameras.filter(c => c.is_enabled).forEach(cam => {
+            connectLiveStream(cam.id);
+        });
+    } catch (e) { console.error('Failed to load cameras:', e); }
+
+    // Load recent events
+    try {
+        const events = await apiFetch('/api/v1/events?limit=10');
+        renderEventList(events, document.getElementById('recentEvents'));
+    } catch (e) { console.error('Failed to load events:', e); }
+}
+</script>
+{% endblock %}

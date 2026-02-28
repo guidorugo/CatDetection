@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CatDetect - Login</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="login-page">
+    <div class="login-container">
+        <h1>CatDetect</h1>
+        <p class="subtitle">Cat Detection & Identification</p>
+        <form id="loginForm" onsubmit="handleLogin(event)">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" required autofocus>
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+            <div id="loginError" class="error-message" style="display:none"></div>
+            <button type="submit" class="btn btn-primary btn-block">Login</button>
+        </form>
+    </div>
+    <script src="/static/js/app.js"></script>
+    <script>
+        async function handleLogin(e) {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const errEl = document.getElementById('loginError');
+            errEl.style.display = 'none';
+
+            try {
+                const resp = await fetch('/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username, password})
+                });
+                if (!resp.ok) {
+                    const data = await resp.json();
+                    throw new Error(data.detail || 'Login failed');
+                }
+                const data = await resp.json();
+                localStorage.setItem('access_token', data.access_token);
+                localStorage.setItem('refresh_token', data.refresh_token);
+                window.location.href = '/dashboard';
+            } catch (err) {
+                errEl.textContent = err.message;
+                errEl.style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}CatDetect{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/dashboard">CatDetect</a>
+        </div>
+        <div class="nav-links" id="navLinks">
+            <a href="/dashboard" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="/cameras" class="{% if active_page == 'cameras' %}active{% endif %}">Cameras</a>
+            <a href="/cats" class="{% if active_page == 'cats' %}active{% endif %}">Cats</a>
+            <a href="/events" class="{% if active_page == 'events' %}active{% endif %}">Events</a>
+            <a href="/recordings" class="{% if active_page == 'recordings' %}active{% endif %}">Recordings</a>
+            <a href="/training" class="{% if active_page == 'training' %}active{% endif %}">Training</a>
+            <a href="#" onclick="logout()" class="nav-logout">Logout</a>
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <script src="/static/js/app.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

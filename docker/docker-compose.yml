@@ -1,0 +1,32 @@
+services:
+  catdetect:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.jetson
+      network: host
+    runtime: nvidia
+    container_name: catdetect
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /ssd/projects/cat-detection-project/data:/app/data
+      - /ssd/projects/cat-detection-project/models:/app/models
+      - /ssd/projects/cat-detection-project/recordings:/app/recordings
+      - /ssd/projects/cat-detection-project/thumbnails:/app/thumbnails
+      - catdetect-db:/app/db
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./db/catdetect.db
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  catdetect-db:

@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Cats - CatDetect{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Cat Profiles</h1>
+    <button class="btn btn-primary" onclick="showAddCat()">Add Cat</button>
+</div>
+
+<div id="addCatForm" class="form-card" style="display:none">
+    <h3>Add Cat</h3>
+    <form onsubmit="addCat(event)">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Name</label>
+                <input type="text" id="catName" required>
+            </div>
+            <div class="form-group">
+                <label>Description</label>
+                <input type="text" id="catDesc" placeholder="Orange tabby">
+            </div>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Save</button>
+            <button type="button" class="btn btn-secondary" onclick="hideAddCat()">Cancel</button>
+        </div>
+    </form>
+</div>
+
+<div class="cat-grid" id="catGrid">
+    <p class="empty-state">Loading...</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', loadCats);
+
+async function loadCats() {
+    const cats = await apiFetch('/api/v1/cats');
+    const grid = document.getElementById('catGrid');
+    if (cats.length === 0) {
+        grid.innerHTML = '<p class="empty-state">No cats registered.</p>';
+        return;
+    }
+    grid.innerHTML = cats.map(cat => `
+        <div class="cat-card">
+            <div class="cat-avatar">${cat.profile_image_path ?
+                `<img src="/api/v1/cats/${cat.id}/profile-image" alt="${cat.name}">` :
+                `<div class="cat-initial">${cat.name[0].toUpperCase()}</div>`}</div>
+            <h3>${cat.name}</h3>
+            <p>${cat.description || ''}</p>
+            <div class="cat-actions">
+                <a href="/events?cat_id=${cat.id}" class="btn btn-sm">Events</a>
+                <button class="btn btn-sm btn-danger" onclick="deleteCat(${cat.id})">Delete</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showAddCat() { document.getElementById('addCatForm').style.display = 'block'; }
+function hideAddCat() { document.getElementById('addCatForm').style.display = 'none'; }
+
+async function addCat(e) {
+    e.preventDefault();
+    await apiFetch('/api/v1/cats', {
+        method: 'POST',
+        body: JSON.stringify({
+            name: document.getElementById('catName').value,
+            description: document.getElementById('catDesc').value || null,
+        })
+    });
+    hideAddCat();
+    loadCats();
+}
+
+async function deleteCat(id) {
+    if (!confirm('Delete this cat profile?')) return;
+    await apiFetch(`/api/v1/cats/${id}`, {method: 'DELETE'});
+    loadCats();
+}
+</script>
+{% endblock %}

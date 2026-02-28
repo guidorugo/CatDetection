@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Cameras - CatDetect{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Camera Management</h1>
+    <button class="btn btn-primary" onclick="showAddCamera()">Add Camera</button>
+</div>
+
+<div id="addCameraForm" class="form-card" style="display:none">
+    <h3>Add Camera</h3>
+    <form onsubmit="addCamera(event)">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Name</label>
+                <input type="text" id="camName" required placeholder="Front Door">
+            </div>
+            <div class="form-group">
+                <label>Source URL</label>
+                <input type="text" id="camUrl" required placeholder="rtsp://192.168.1.100:554/stream">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Type</label>
+                <select id="camType">
+                    <option value="rtsp">RTSP</option>
+                    <option value="mjpeg">MJPEG</option>
+                    <option value="http">HTTP</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Location</label>
+                <input type="text" id="camLocation" placeholder="Living Room">
+            </div>
+            <div class="form-group">
+                <label>Expected FPS</label>
+                <input type="number" id="camFps" value="30" min="1" max="120">
+            </div>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Save</button>
+            <button type="button" class="btn btn-secondary" onclick="hideAddCamera()">Cancel</button>
+        </div>
+    </form>
+</div>
+
+<div class="camera-list" id="cameraList">
+    <p class="empty-state">Loading...</p>
+</div>
+
+<div id="cameraWarning" class="warning-banner" style="display:none">
+    Performance warning: Running more cameras may impact detection speed on this hardware.
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', loadCameras);
+
+async function loadCameras() {
+    const cameras = await apiFetch('/api/v1/cameras');
+    const list = document.getElementById('cameraList');
+    if (cameras.length === 0) {
+        list.innerHTML = '<p class="empty-state">No cameras configured yet.</p>';
+        return;
+    }
+    list.innerHTML = cameras.map(cam => `
+        <div class="list-card">
+            <div class="list-card-info">
+                <h3>${cam.name}</h3>
+                <p>${cam.source_url}</p>
+                <p class="meta">${cam.source_type.toUpperCase()} | ${cam.location || 'No location'} | ${cam.expected_fps} FPS</p>
+            </div>
+            <div class="list-card-actions">
+                <span class="status-badge status-${cam.is_enabled ? 'connected' : 'disabled'}">${cam.is_enabled ? 'Enabled' : 'Disabled'}</span>
+                <button class="btn btn-sm" onclick="toggleCamera(${cam.id}, ${cam.is_enabled})">${cam.is_enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteCamera(${cam.id})">Delete</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showAddCamera() { document.getElementById('addCameraForm').style.display = 'block'; }
+function hideAddCamera() { document.getElementById('addCameraForm').style.display = 'none'; }
+
+async function addCamera(e) {
+    e.preventDefault();
+    const data = {
+        name: document.getElementById('camName').value,
+        source_url: document.getElementById('camUrl').value,
+        source_type: document.getElementById('camType').value,
+        location: document.getElementById('camLocation').value || null,
+        expected_fps: parseInt(document.getElementById('camFps').value),
+    };
+    await apiFetch('/api/v1/cameras', {method: 'POST', body: JSON.stringify(data)});
+    hideAddCamera();
+    loadCameras();
+}
+
+async function toggleCamera(id, isEnabled) {
+    const action = isEnabled ? 'disable' : 'enable';
+    await apiFetch(`/api/v1/cameras/${id}/${action}`, {method: 'POST'});
+    loadCameras();
+}
+
+async function deleteCamera(id) {
+    if (!confirm('Delete this camera?')) return;
+    await apiFetch(`/api/v1/cameras/${id}`, {method: 'DELETE'});
+    loadCameras();
+}
+</script>
+{% endblock %}

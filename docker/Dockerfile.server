@@ -1,0 +1,25 @@
+FROM nvidia/cuda:12.6.0-cudnn-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-venv python3-pip python3.12-dev \
+    ffmpeg libgl1-mesa-glx libglib2.0-0 \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+
+# Application code
+COPY . .
+
+RUN mkdir -p models/detection models/identification recordings thumbnails data/processed
+
+EXPOSE 8000
+
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
