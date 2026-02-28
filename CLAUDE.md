@@ -44,6 +44,17 @@
 - `bcrypt` pinned to `<5.0.0` for passlib compatibility
 - ML imports in `app/main.py` are lazy (inside lifespan) to allow API-only mode when torch is unavailable
 
+## Two-Machine Training
+
+- Train on a server with a bigger GPU, run inference on the Jetson
+- PyTorch `.pth` files are portable between x86_64 ↔ ARM64 (`map_location=device`)
+- TensorRT `.engine` files are NOT portable (device-specific), but the app falls back to `.pth`
+- `scripts/sync_and_train.sh` runs on the server: rsync data → train → rsync model → reload
+- `POST /api/v1/training/reload-model` hot-swaps the identifier model without restarting the app
+- SQLite stays on Jetson only; the server never touches the database
+- `scripts/prepare_data.py` must run on the Jetson (needs YOLO + raw images)
+- `scripts/train_identifier.py` runs unmodified on the server
+
 ## Environment Variables
 
 See `.env.example` for all available settings.
