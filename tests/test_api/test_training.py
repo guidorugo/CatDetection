@@ -52,7 +52,8 @@ async def test_list_training_jobs(client: AsyncClient, auth_headers, db_session)
     resp = await client.get("/api/v1/training/jobs", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) >= 1
+    assert data["total"] >= 1
+    assert len(data["items"]) >= 1
 
 
 @pytest.mark.asyncio

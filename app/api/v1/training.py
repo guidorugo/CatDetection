@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -449,16 +449,25 @@ async def start_training(
     return job
 
 
-@router.get("/jobs", response_model=list[TrainingJobResponse])
+@router.get("/jobs")
 async def list_training_jobs(
-    limit: int = 20,
+    limit: int = 10,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    total_result = await db.execute(select(func.count(TrainingJob.id)))
+    total = total_result.scalar()
     result = await db.execute(
-        select(TrainingJob).order_by(TrainingJob.created_at.desc()).limit(limit)
+        select(TrainingJob).order_by(TrainingJob.created_at.desc()).offset(offset).limit(limit)
     )
-    return result.scalars().all()
+    jobs = result.scalars().all()
+    return {
+        "items": [TrainingJobResponse.model_validate(j) for j in jobs],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/jobs/{job_id}", response_model=TrainingJobResponse)

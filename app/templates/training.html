@@ -90,6 +90,7 @@
     <div id="jobList">
         <p class="empty-state">Loading...</p>
     </div>
+    <div id="jobPagination" class="pagination" style="display:none"></div>
 </div>
 
 <div class="section">
@@ -103,14 +104,22 @@
 {% block scripts %}
 <script>
 let pollTimer = null;
+const PAGE_SIZE = 10;
+let currentPage = 0;
 
 document.addEventListener('DOMContentLoaded', () => { loadJobs(); loadModels(); });
 
 async function loadJobs() {
-    const jobs = await apiFetch('/api/v1/training/jobs');
+    const offset = currentPage * PAGE_SIZE;
+    const data = await apiFetch(`/api/v1/training/jobs?limit=${PAGE_SIZE}&offset=${offset}`);
+    const jobs = data.items;
+    const total = data.total;
     const list = document.getElementById('jobList');
-    if (jobs.length === 0) {
+    const pagination = document.getElementById('jobPagination');
+
+    if (total === 0) {
         list.innerHTML = '<p class="empty-state">No training jobs.</p>';
+        pagination.style.display = 'none';
         stopPolling();
         return;
     }
@@ -146,11 +155,31 @@ async function loadJobs() {
         `;
     }).join('');
 
+    // Pagination controls
+    const totalPages = Math.ceil(total / PAGE_SIZE);
+    if (totalPages > 1) {
+        let btns = '';
+        btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>&laquo; Prev</button>`;
+        for (let i = 0; i < totalPages; i++) {
+            btns += `<button class="btn btn-sm ${i === currentPage ? 'btn-primary' : 'btn-secondary'}" onclick="goToPage(${i})">${i + 1}</button>`;
+        }
+        btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next &raquo;</button>`;
+        pagination.innerHTML = btns;
+        pagination.style.display = 'flex';
+    } else {
+        pagination.style.display = 'none';
+    }
+
     if (hasActive) {
         startPolling();
     } else {
         stopPolling();
     }
+}
+
+function goToPage(page) {
+    currentPage = page;
+    loadJobs();
 }
 
 function startPolling() {
