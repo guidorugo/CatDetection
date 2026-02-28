@@ -200,6 +200,10 @@ async def _resume_remote_training_job(job_id: int, job_config: dict, app) -> Non
             registry.activate_model(version)
             logger.info("Registered remote model version %s", version)
 
+        best_metric = None
+        if version and version in remote_registry.get("models", {}):
+            best_metric = remote_registry["models"][version].get("metrics", {}).get("rank1")
+
         epochs_total = job_config.get("epochs", 0)
         async with async_session() as db:
             result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
@@ -208,6 +212,7 @@ async def _resume_remote_training_job(job_id: int, job_config: dict, app) -> Non
             job.model_version = version
             job.model_path = model_path
             job.epochs_completed = epochs_total
+            job.best_metric = best_metric
             await db.commit()
 
         step = "reloading model"
@@ -462,6 +467,11 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             registry.activate_model(version)
             logger.info("Registered remote model version %s", version)
 
+        # Extract best metric from registry
+        best_metric = None
+        if version and version in remote_registry.get("models", {}):
+            best_metric = remote_registry["models"][version].get("metrics", {}).get("rank1")
+
         # Update job as completed
         async with async_session() as db:
             result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
@@ -470,6 +480,7 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             job.model_version = version
             job.model_path = model_path
             job.epochs_completed = data.epochs
+            job.best_metric = best_metric
             await db.commit()
 
         # Reload model
