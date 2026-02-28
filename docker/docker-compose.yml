@@ -16,16 +16,11 @@ services:
       - catdetect-db:/app/db
       - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+    env_file:
+      - ../.env
     environment:
+      # Override DATABASE_URL to use the Docker volume path
       - DATABASE_URL=sqlite+aiosqlite:///./db/catdetect.db
-      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
-      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
-      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
-      - TRAINING_SERVER_SSH=${TRAINING_SERVER_SSH:-}
-      - TRAINING_SERVER_PORT=${TRAINING_SERVER_PORT:-8001}
-      - TRAINING_API_KEY=${TRAINING_API_KEY:-}
-      - TRAINING_SERVER_DIR=${TRAINING_SERVER_DIR:-~/cat-detection-project}
     deploy:
       resources:
         reservations:
