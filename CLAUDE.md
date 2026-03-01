@@ -86,6 +86,20 @@
 - Cats page shows thumbnail grid per cat with upload (+) button, lightbox preview, and per-image delete
 - `_find_cat_dir()` helper handles case-insensitive directory matching (DB names are capitalized, data dirs are lowercase)
 
+## Hyperparameter Search
+
+- `POST /api/v1/training/search` — start a search over all combinations of learning rates, epochs, and freeze epochs
+- `GET /api/v1/training/searches` — list searches (paginated `{items, total, limit, offset}`)
+- `GET /api/v1/training/searches/{id}` — get search with all trial details
+- `POST /api/v1/training/searches/{id}/cancel` — cancel search + running trial
+- Trials run sequentially; detection pipeline is paused once for the entire search
+- Data preparation runs only on the first trial; subsequent trials reuse processed data
+- On completion, the best model (by rank-1 accuracy) is automatically registered, activated, and embeddings are regenerated
+- `HyperparamSearch` model links to `TrainingJob` via `search_id` FK and `trial_number`
+- `_run_training_job()` and `_run_remote_training_job()` accept `skip_post_training=True` to skip model registration/reload/embedding generation (caller handles it)
+- Orphaned searches are handled on startup: remote searches resume, local searches are marked failed
+- Training UI shows a "Hyperparameter Search" button with comma-separated parameter inputs and live combination counter
+
 ## API Pagination
 
 - `GET /api/v1/events` and `GET /api/v1/training/jobs` return paginated responses: `{items, total, limit, offset}`

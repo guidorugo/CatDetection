@@ -27,7 +27,38 @@ class TrainingJobResponse(BaseModel):
     best_metric: float | None
     model_path: str | None
     error_message: str | None
+    search_id: int | None = None
+    trial_number: int | None = None
     created_at: datetime
     updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class HyperparamSearchStart(BaseModel):
+    learning_rates: list[float] = [0.001]
+    epochs_list: list[int] = [50]
+    freeze_epochs_list: list[int] = [10]
+    prepare_data: bool = True
+    training_location: str = "local"
+    server_ssh: str | None = None
+    server_port: int | None = None
+    server_dir: str | None = None
+    api_key: str | None = None
+
+
+class HyperparamSearchResponse(BaseModel):
+    id: int
+    status: str
+    param_grid: str
+    training_location: str
+    total_trials: int
+    completed_trials: int
+    failed_trials: int
+    best_trial_id: int | None
+    best_metric: float | None
+    created_at: datetime
+    updated_at: datetime
+    trials: list[TrainingJobResponse] = []
 
     model_config = {"from_attributes": True}

@@ -11,9 +11,15 @@ from app.api.deps import get_current_user, get_db
 from app.core.config import settings
 from app.core.database import async_session
 from app.core.logging import get_logger
+from app.models.hyperparam_search import HyperparamSearch
 from app.models.training_job import TrainingJob
 from app.models.user import User
-from app.schemas.training import TrainingJobResponse, TrainingStart
+from app.schemas.training import (
+    HyperparamSearchResponse,
+    HyperparamSearchStart,
+    TrainingJobResponse,
+    TrainingStart,
+)
 
 logger = get_logger(__name__)
 
@@ -264,9 +270,65 @@ async def _resume_remote_training_job(job_id: int, job_config: dict, app) -> Non
 
 async def resume_orphaned_jobs(app) -> None:
     """On startup, find stuck running/pending jobs and resume or fail them."""
+    # Handle orphaned hyperparameter searches
     async with async_session() as db:
         result = await db.execute(
-            select(TrainingJob).where(TrainingJob.status.in_(["running", "pending"]))
+            select(HyperparamSearch).where(HyperparamSearch.status.in_(["running", "pending"]))
+        )
+        orphaned_searches = result.scalars().all()
+
+    for search in orphaned_searches:
+        is_remote = search.training_location == "remote"
+        if is_remote:
+            base_config = json.loads(search.base_config) if search.base_config else {}
+            server_ssh = base_config.get("server_ssh") or settings.TRAINING_SERVER_SSH
+            api_key = base_config.get("api_key") or settings.TRAINING_API_KEY
+            if server_ssh and api_key:
+                logger.info("Resuming orphaned remote hyperparameter search %d", search.id)
+                asyncio.create_task(_run_hyperparam_search(search.id, app))
+            else:
+                logger.warning("Cannot resume remote search %d: missing server config", search.id)
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(HyperparamSearch).where(HyperparamSearch.id == search.id)
+                    )
+                    s = result.scalar_one()
+                    s.status = "failed"
+                    # Also fail pending trials
+                    trial_result = await db.execute(
+                        select(TrainingJob)
+                        .where(TrainingJob.search_id == search.id)
+                        .where(TrainingJob.status.in_(["pending", "running"]))
+                    )
+                    for t in trial_result.scalars().all():
+                        t.status = "failed"
+                        t.error_message = "Process restarted; missing remote server config"
+                    await db.commit()
+        else:
+            logger.warning("Marking orphaned local search %d as failed", search.id)
+            async with async_session() as db:
+                result = await db.execute(
+                    select(HyperparamSearch).where(HyperparamSearch.id == search.id)
+                )
+                s = result.scalar_one()
+                s.status = "failed"
+                trial_result = await db.execute(
+                    select(TrainingJob)
+                    .where(TrainingJob.search_id == search.id)
+                    .where(TrainingJob.status.in_(["pending", "running"]))
+                )
+                for t in trial_result.scalars().all():
+                    t.status = "failed"
+                    t.error_message = "Process restarted; local training cannot be resumed"
+                await db.commit()
+
+    # Handle orphaned standalone training jobs (not part of a search)
+    async with async_session() as db:
+        result = await db.execute(
+            select(TrainingJob).where(
+                TrainingJob.status.in_(["running", "pending"]),
+                TrainingJob.search_id.is_(None),
+            )
         )
         orphaned_jobs = result.scalars().all()
 
@@ -302,7 +364,7 @@ async def resume_orphaned_jobs(app) -> None:
                 await db.commit()
 
 
-async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> None:
+async def _run_remote_training_job(job_id: int, data: TrainingStart, app, skip_post_training: bool = False) -> None:
     """Run training on the remote GPU server: rsync → train → download model → reload."""
     import re
     import subprocess
@@ -478,25 +540,26 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
         except httpx.TimeoutException:
             raise RuntimeError(f"Timeout downloading model from {base_url}")
 
-        # Fix paths in registry to point to local model
-        step = "registering model"
-        from app.ml.model_registry import ModelRegistry
-
-        registry = ModelRegistry()
+        # Extract version and best metric from remote registry
         version = remote_status.get("model_version")
-        if version and version in remote_registry.get("models", {}):
-            registry.register_model(
-                version=version,
-                path=model_path,
-                metrics=remote_registry["models"][version].get("metrics", {}),
-            )
-            registry.activate_model(version)
-            logger.info("Registered remote model version %s", version)
-
-        # Extract best metric from registry
         best_metric = None
         if version and version in remote_registry.get("models", {}):
             best_metric = remote_registry["models"][version].get("metrics", {}).get("rank1")
+
+        if not skip_post_training:
+            # Fix paths in registry to point to local model
+            step = "registering model"
+            from app.ml.model_registry import ModelRegistry
+
+            registry = ModelRegistry()
+            if version and version in remote_registry.get("models", {}):
+                registry.register_model(
+                    version=version,
+                    path=model_path,
+                    metrics=remote_registry["models"][version].get("metrics", {}),
+                )
+                registry.activate_model(version)
+                logger.info("Registered remote model version %s", version)
 
         # Update job as completed
         async with async_session() as db:
@@ -509,18 +572,19 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             job.best_metric = best_metric
             await db.commit()
 
-        # Reload model
-        step = "reloading model"
-        if pipeline:
-            pipeline.pause()
-            try:
-                await _reload_model_after_training(app, model_path)
-            finally:
-                pipeline.resume()
+        if not skip_post_training:
+            # Reload model
+            step = "reloading model"
+            if pipeline:
+                pipeline.pause()
+                try:
+                    await _reload_model_after_training(app, model_path)
+                finally:
+                    pipeline.resume()
 
-        # Generate reference embeddings from training data
-        step = "generating embeddings"
-        await _generate_embeddings_after_training(app)
+            # Generate reference embeddings from training data
+            step = "generating embeddings"
+            await _generate_embeddings_after_training(app)
 
     except Exception as e:
         logger.error("Remote training job %d failed at step '%s': %s: %s",
@@ -533,7 +597,7 @@ async def _run_remote_training_job(job_id: int, data: TrainingStart, app) -> Non
             await db.commit()
 
 
-async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
+async def _run_training_job(job_id: int, data: TrainingStart, app, skip_post_training: bool = False) -> None:
     """Run training in background: pause pipeline → train → register → reload → resume."""
     pipeline = getattr(app.state, "detection_pipeline", None)
 
@@ -545,8 +609,8 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
         await db.commit()
 
     try:
-        # Pause detection to free GPU memory
-        if pipeline:
+        # Pause detection to free GPU memory (only if not managed by caller)
+        if not skip_post_training and pipeline:
             pipeline.pause()
             logger.info("Detection pipeline paused for training")
 
@@ -626,17 +690,18 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             logger.info("Training job %d cancelled", job_id)
             return
 
-        # Register model
-        from app.ml.model_registry import ModelRegistry
+        if not skip_post_training:
+            # Register model
+            from app.ml.model_registry import ModelRegistry
 
-        registry = ModelRegistry()
-        registry.register_model(
-            version=results["version"],
-            path=results["model_path"],
-            metrics={"rank1": results["best_rank1"]},
-        )
-        registry.activate_model(results["version"])
-        logger.info("Registered model version %s", results["version"])
+            registry = ModelRegistry()
+            registry.register_model(
+                version=results["version"],
+                path=results["model_path"],
+                metrics={"rank1": results["best_rank1"]},
+            )
+            registry.activate_model(results["version"])
+            logger.info("Registered model version %s", results["version"])
 
         # Update job as completed
         async with async_session() as db:
@@ -649,11 +714,12 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             job.loss_history = json.dumps(results["loss_history"])
             await db.commit()
 
-        # Reload model into identifier
-        await _reload_model_after_training(app, results["model_path"])
+        if not skip_post_training:
+            # Reload model into identifier
+            await _reload_model_after_training(app, results["model_path"])
 
-        # Generate reference embeddings from training data
-        await _generate_embeddings_after_training(app)
+            # Generate reference embeddings from training data
+            await _generate_embeddings_after_training(app)
 
     except Exception as e:
         logger.error("Training job %d failed: %s", job_id, e)
@@ -665,7 +731,7 @@ async def _run_training_job(job_id: int, data: TrainingStart, app) -> None:
             job.error_message = str(e)
             await db.commit()
     finally:
-        if pipeline:
+        if not skip_post_training and pipeline:
             pipeline.resume()
             logger.info("Detection pipeline resumed")
 
@@ -794,6 +860,437 @@ async def cancel_training_job(
 
     logger.info("Training job %d cancelled", job_id)
     return job
+
+
+async def _run_hyperparam_search(search_id: int, app) -> None:
+    """Orchestrate a hyperparameter search: run all trials sequentially, activate best model."""
+    pipeline = getattr(app.state, "detection_pipeline", None)
+
+    try:
+        # Load the search and its param grid
+        async with async_session() as db:
+            result = await db.execute(
+                select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+            )
+            search = result.scalar_one()
+            search.status = "running"
+            await db.commit()
+
+            param_grid = json.loads(search.param_grid)
+            base_config = json.loads(search.base_config) if search.base_config else {}
+            training_location = search.training_location
+
+        # Pause detection pipeline once for the entire search
+        if pipeline:
+            pipeline.pause()
+            logger.info("Detection pipeline paused for hyperparameter search %d", search_id)
+
+        # Get all trials in order
+        async with async_session() as db:
+            result = await db.execute(
+                select(TrainingJob)
+                .where(TrainingJob.search_id == search_id)
+                .order_by(TrainingJob.trial_number)
+            )
+            trials = result.scalars().all()
+            trial_ids = [t.id for t in trials]
+            trial_configs = [json.loads(t.config) if t.config else {} for t in trials]
+
+        best_metric = None
+        best_trial_id = None
+
+        for i, (trial_id, trial_config) in enumerate(zip(trial_ids, trial_configs)):
+            # Check if search was cancelled
+            async with async_session() as db:
+                result = await db.execute(
+                    select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+                )
+                search = result.scalar_one()
+                if search.status == "cancelled":
+                    logger.info("Hyperparameter search %d cancelled, stopping at trial %d", search_id, i + 1)
+                    # Cancel remaining pending trials
+                    await db.execute(
+                        select(TrainingJob)
+                        .where(TrainingJob.search_id == search_id)
+                        .where(TrainingJob.status == "pending")
+                    )
+                    pending_trials = (await db.execute(
+                        select(TrainingJob)
+                        .where(TrainingJob.search_id == search_id)
+                        .where(TrainingJob.status == "pending")
+                    )).scalars().all()
+                    for t in pending_trials:
+                        t.status = "cancelled"
+                    await db.commit()
+                    return
+
+            # Build TrainingStart for this trial
+            trial_data = TrainingStart(
+                model_type="cat_reid",
+                epochs=trial_config.get("epochs", 50),
+                learning_rate=trial_config.get("learning_rate", 0.001),
+                freeze_epochs=trial_config.get("freeze_epochs", 10),
+                prepare_data=(i == 0 and trial_config.get("prepare_data", True)),
+                training_location=training_location,
+                server_ssh=base_config.get("server_ssh"),
+                server_port=base_config.get("server_port"),
+                server_dir=base_config.get("server_dir"),
+                api_key=base_config.get("api_key"),
+            )
+
+            logger.info("Search %d: starting trial %d/%d (lr=%.6f, epochs=%d, freeze=%d)",
+                         search_id, i + 1, len(trial_ids),
+                         trial_data.learning_rate, trial_data.epochs, trial_data.freeze_epochs)
+
+            try:
+                if training_location == "remote":
+                    await _run_remote_training_job(trial_id, trial_data, app, skip_post_training=True)
+                else:
+                    await _run_training_job(trial_id, trial_data, app, skip_post_training=True)
+
+                # Check trial result
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(TrainingJob).where(TrainingJob.id == trial_id)
+                    )
+                    trial = result.scalar_one()
+
+                    if trial.status == "completed" and trial.best_metric is not None:
+                        async with async_session() as db2:
+                            result2 = await db2.execute(
+                                select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+                            )
+                            search = result2.scalar_one()
+                            search.completed_trials += 1
+                            if best_metric is None or trial.best_metric > best_metric:
+                                best_metric = trial.best_metric
+                                best_trial_id = trial.id
+                                search.best_metric = best_metric
+                                search.best_trial_id = best_trial_id
+                            await db2.commit()
+                    elif trial.status == "cancelled":
+                        logger.info("Search %d: trial %d was cancelled", search_id, i + 1)
+                        async with async_session() as db2:
+                            result2 = await db2.execute(
+                                select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+                            )
+                            search = result2.scalar_one()
+                            search.status = "cancelled"
+                            # Cancel remaining pending trials
+                            pending = (await db2.execute(
+                                select(TrainingJob)
+                                .where(TrainingJob.search_id == search_id)
+                                .where(TrainingJob.status == "pending")
+                            )).scalars().all()
+                            for t in pending:
+                                t.status = "cancelled"
+                            await db2.commit()
+                        return
+                    else:
+                        async with async_session() as db2:
+                            result2 = await db2.execute(
+                                select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+                            )
+                            search = result2.scalar_one()
+                            search.failed_trials += 1
+                            await db2.commit()
+                        logger.warning("Search %d: trial %d failed", search_id, i + 1)
+
+            except Exception as trial_err:
+                logger.error("Search %d: trial %d error: %s", search_id, i + 1, trial_err)
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+                    )
+                    search = result.scalar_one()
+                    search.failed_trials += 1
+                    await db.commit()
+
+        # All trials done — activate best model
+        if best_trial_id:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == best_trial_id)
+                )
+                best_trial = result.scalar_one()
+
+            if best_trial.model_path and best_trial.model_version:
+                from app.ml.model_registry import ModelRegistry
+
+                registry = ModelRegistry()
+                # Register all completed trial models, activate the best
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(TrainingJob)
+                        .where(TrainingJob.search_id == search_id)
+                        .where(TrainingJob.status == "completed")
+                        .where(TrainingJob.model_path.isnot(None))
+                    )
+                    completed_trials = result.scalars().all()
+
+                for trial in completed_trials:
+                    if trial.model_version and trial.model_path:
+                        try:
+                            registry.register_model(
+                                version=trial.model_version,
+                                path=trial.model_path,
+                                metrics={"rank1": trial.best_metric} if trial.best_metric else {},
+                            )
+                        except Exception:
+                            pass  # Already registered
+
+                registry.activate_model(best_trial.model_version)
+                logger.info("Search %d: activated best model %s (rank1=%.4f)",
+                            search_id, best_trial.model_version, best_metric or 0)
+
+                await _reload_model_after_training(app, best_trial.model_path)
+                await _generate_embeddings_after_training(app)
+
+        # Mark search as completed
+        async with async_session() as db:
+            result = await db.execute(
+                select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+            )
+            search = result.scalar_one()
+            search.status = "completed"
+            await db.commit()
+
+        logger.info("Hyperparameter search %d completed: %d/%d trials, best=%.4f",
+                     search_id, search.completed_trials, search.total_trials, best_metric or 0)
+
+    except Exception as e:
+        logger.error("Hyperparameter search %d failed: %s", search_id, e)
+        async with async_session() as db:
+            result = await db.execute(
+                select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+            )
+            search = result.scalar_one()
+            search.status = "failed"
+            await db.commit()
+    finally:
+        if pipeline:
+            pipeline.resume()
+            logger.info("Detection pipeline resumed after search %d", search_id)
+
+
+@router.post("/search", response_model=HyperparamSearchResponse, status_code=status.HTTP_201_CREATED)
+async def start_hyperparam_search(
+    request: Request,
+    data: HyperparamSearchStart,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Start a hyperparameter search over all combinations of provided parameters."""
+    from itertools import product
+
+    # Check for active training jobs or searches
+    result = await db.execute(
+        select(TrainingJob).where(TrainingJob.status.in_(["pending", "running"]))
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="A training job is already running")
+
+    result = await db.execute(
+        select(HyperparamSearch).where(HyperparamSearch.status.in_(["pending", "running"]))
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="A hyperparameter search is already running")
+
+    # Build parameter combinations
+    combinations = list(product(data.learning_rates, data.epochs_list, data.freeze_epochs_list))
+    if not combinations:
+        raise HTTPException(status_code=400, detail="No parameter combinations to try")
+
+    param_grid = {
+        "learning_rates": data.learning_rates,
+        "epochs_list": data.epochs_list,
+        "freeze_epochs_list": data.freeze_epochs_list,
+    }
+    base_config = {}
+    if data.server_ssh:
+        base_config["server_ssh"] = data.server_ssh
+    if data.server_port:
+        base_config["server_port"] = data.server_port
+    if data.server_dir:
+        base_config["server_dir"] = data.server_dir
+    if data.api_key:
+        base_config["api_key"] = data.api_key
+
+    # Validate remote config
+    if data.training_location == "remote":
+        server_ssh = data.server_ssh or settings.TRAINING_SERVER_SSH
+        api_key = data.api_key or settings.TRAINING_API_KEY
+        if not server_ssh or not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote training not configured (server SSH and API key required)",
+            )
+
+    # Create the search
+    search = HyperparamSearch(
+        status="pending",
+        param_grid=json.dumps(param_grid),
+        training_location=data.training_location,
+        base_config=json.dumps(base_config) if base_config else None,
+        total_trials=len(combinations),
+    )
+    db.add(search)
+    await db.commit()
+    await db.refresh(search)
+
+    # Create trial jobs
+    for i, (lr, epochs, freeze_epochs) in enumerate(combinations):
+        trial_config = {
+            "model_type": "cat_reid",
+            "epochs": epochs,
+            "learning_rate": lr,
+            "freeze_epochs": freeze_epochs,
+            "prepare_data": data.prepare_data,
+            "training_location": data.training_location,
+        }
+        trial = TrainingJob(
+            model_type="cat_reid",
+            epochs_total=epochs,
+            config=json.dumps(trial_config),
+            search_id=search.id,
+            trial_number=i + 1,
+        )
+        db.add(trial)
+
+    await db.commit()
+
+    # Reload with trials
+    await db.refresh(search)
+    result = await db.execute(
+        select(TrainingJob)
+        .where(TrainingJob.search_id == search.id)
+        .order_by(TrainingJob.trial_number)
+    )
+    search.trials = result.scalars().all()
+
+    asyncio.create_task(_run_hyperparam_search(search.id, request.app))
+    logger.info("Hyperparameter search %d started: %d trials", search.id, len(combinations))
+
+    return search
+
+
+@router.get("/searches")
+async def list_hyperparam_searches(
+    limit: int = 10,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """List hyperparameter searches with pagination."""
+    total_result = await db.execute(select(func.count(HyperparamSearch.id)))
+    total = total_result.scalar()
+    result = await db.execute(
+        select(HyperparamSearch)
+        .order_by(HyperparamSearch.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    searches = result.scalars().all()
+
+    # Load trials for each search
+    items = []
+    for s in searches:
+        trial_result = await db.execute(
+            select(TrainingJob)
+            .where(TrainingJob.search_id == s.id)
+            .order_by(TrainingJob.trial_number)
+        )
+        s.trials = trial_result.scalars().all()
+        items.append(HyperparamSearchResponse.model_validate(s))
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/searches/{search_id}", response_model=HyperparamSearchResponse)
+async def get_hyperparam_search(
+    search_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Get a hyperparameter search with all its trials."""
+    result = await db.execute(
+        select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+    )
+    search = result.scalar_one_or_none()
+    if not search:
+        raise HTTPException(status_code=404, detail="Hyperparameter search not found")
+
+    trial_result = await db.execute(
+        select(TrainingJob)
+        .where(TrainingJob.search_id == search.id)
+        .order_by(TrainingJob.trial_number)
+    )
+    search.trials = trial_result.scalars().all()
+    return search
+
+
+@router.post("/searches/{search_id}/cancel")
+async def cancel_hyperparam_search(
+    search_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Cancel a running hyperparameter search and its current trial."""
+    result = await db.execute(
+        select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+    )
+    search = result.scalar_one_or_none()
+    if not search:
+        raise HTTPException(status_code=404, detail="Hyperparameter search not found")
+    if search.status not in ("pending", "running"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel search with status '{search.status}'")
+
+    search.status = "cancelled"
+
+    # Cancel any running/pending trials
+    trial_result = await db.execute(
+        select(TrainingJob)
+        .where(TrainingJob.search_id == search_id)
+        .where(TrainingJob.status.in_(["pending", "running"]))
+    )
+    active_trials = trial_result.scalars().all()
+    for trial in active_trials:
+        if trial.status == "running":
+            # Signal cancellation for the running trial
+            job_config = json.loads(trial.config) if trial.config else {}
+            is_remote = job_config.get("training_location") == "remote"
+            if is_remote:
+                server_ssh = job_config.get("server_ssh") or settings.TRAINING_SERVER_SSH
+                server_port = job_config.get("server_port") or settings.TRAINING_SERVER_PORT
+                api_key = job_config.get("api_key") or settings.TRAINING_API_KEY
+                if server_ssh and api_key:
+                    import httpx
+                    base_url = f"http://{server_ssh.split('@')[-1]}:{server_port}"
+                    try:
+                        async with httpx.AsyncClient(timeout=10) as client:
+                            await client.post(
+                                f"{base_url}/cancel",
+                                headers={"X-API-Key": api_key},
+                            )
+                    except Exception as e:
+                        logger.warning("Failed to cancel on remote server: %s", e)
+            else:
+                trainer = getattr(request.app.state, "_current_trainer", None)
+                if trainer:
+                    trainer.cancel()
+        trial.status = "cancelled"
+
+    await db.commit()
+    await db.refresh(search)
+
+    logger.info("Hyperparameter search %d cancelled", search_id)
+    return {"status": "cancelled", "id": search_id}
 
 
 @router.post("/reload-model")

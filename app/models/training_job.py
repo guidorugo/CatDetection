@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -22,6 +22,10 @@ class TrainingJob(Base):
     loss_history: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
     model_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("hyperparam_searches.id"), nullable=True
+    )
+    trial_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -29,4 +33,8 @@ class TrainingJob(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    search: Mapped["HyperparamSearch | None"] = relationship(  # noqa: F821
+        back_populates="trials"
     )
