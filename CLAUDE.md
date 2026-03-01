@@ -63,10 +63,11 @@
 ## Test Page
 
 - `POST /api/v1/test/detect` — upload a photo, detect cats (YOLO) + identify each (ResNet Re-ID + embedding matching), returns JSON with bounding boxes, confidence, cat names, and similarity scores
-- `POST /api/v1/test/feedback` — submit identity correction: crops image at bbox, generates embedding, stores as reference for the specified cat
+- `POST /api/v1/test/feedback` — submit identity correction: crops image at bbox, saves crop to `data/{cat_name}/` as reference image, generates embedding, and rebuilds in-memory embedding store for that cat
 - Handles multiple cats per image; each detection is independently identified
 - UI at `/test` draws bounding boxes on a canvas with color-coded labels
 - Each detection shows a dropdown to correct the cat identity + Save button
+- Feedback crops are saved as `feedback_{timestamp}.jpg` and appear in the cat's image gallery
 
 ## Model Management
 

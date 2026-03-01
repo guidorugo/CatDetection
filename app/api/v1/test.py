@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Annotated
 
 import cv2
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.api.v1.cats import _find_cat_dir
 from app.core.logging import get_logger
 from app.models.cat import Cat, CatEmbedding
 from app.models.user import User
@@ -111,6 +113,13 @@ async def submit_detection_feedback(
     if crop.size == 0:
         raise HTTPException(status_code=400, detail="Invalid bounding box")
 
+    # Save crop to data/{cat_name}/ as a reference image
+    cat_dir = _find_cat_dir(cat.name)
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"feedback_{int(time.time() * 1000)}.jpg"
+    crop_path = cat_dir / filename
+    await asyncio.to_thread(cv2.imwrite, str(crop_path), crop)
+
     # Generate and store embedding
     embedding = await identifier.get_embedding(crop)
 
@@ -122,16 +131,23 @@ async def submit_detection_feedback(
         cat_id=cat.id,
         embedding=embedding.tobytes(),
         model_version=model_version,
+        source_image_path=str(crop_path),
     ))
     await db.commit()
 
-    # Update in-memory store
+    # Rebuild in-memory embeddings for this cat from DB
     if embedding_store:
-        existing = embedding_store._embeddings.get(cat.id, [])
-        existing.append(embedding)
-        embedding_store._embeddings[cat.id] = existing
-        embedding_store._names[cat.id] = cat.name
+        emb_result = await db.execute(
+            select(CatEmbedding).where(CatEmbedding.cat_id == cat.id)
+        )
+        all_embeddings = [
+            np.frombuffer(e.embedding, dtype=np.float32)
+            for e in emb_result.scalars().all()
+        ]
+        embedding_store.remove_cat(cat.id)
+        if all_embeddings:
+            embedding_store.add_cat(cat.id, cat.name, all_embeddings)
 
-    logger.info("Feedback: stored new embedding for cat '%s' (id=%d)", cat.name, cat.id)
+    logger.info("Feedback: stored crop '%s' and embedding for cat '%s' (id=%d)", filename, cat.name, cat.id)
 
     return {"status": "ok", "cat_id": cat.id, "cat_name": cat.name}
