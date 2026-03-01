@@ -747,7 +747,7 @@ async def start_training(
     result = await db.execute(
         select(TrainingJob).where(TrainingJob.status.in_(["pending", "running"]))
     )
-    if result.scalar_one_or_none():
+    if result.scalars().first():
         raise HTTPException(status_code=409, detail="A training job is already running")
 
     job = TrainingJob(
@@ -1087,13 +1087,13 @@ async def start_hyperparam_search(
     result = await db.execute(
         select(TrainingJob).where(TrainingJob.status.in_(["pending", "running"]))
     )
-    if result.scalar_one_or_none():
+    if result.scalars().first():
         raise HTTPException(status_code=409, detail="A training job is already running")
 
     result = await db.execute(
         select(HyperparamSearch).where(HyperparamSearch.status.in_(["pending", "running"]))
     )
-    if result.scalar_one_or_none():
+    if result.scalars().first():
         raise HTTPException(status_code=409, detail="A hyperparameter search is already running")
 
     # Build parameter combinations
