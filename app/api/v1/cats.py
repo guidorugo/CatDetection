@@ -124,7 +124,6 @@ async def upload_profile_image(
 async def get_profile_image(
     cat_id: int,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
 ):
     result = await db.execute(select(Cat).where(Cat.id == cat_id))
     cat = result.scalar_one_or_none()
@@ -219,7 +218,6 @@ async def get_cat_image(
     cat_id: int,
     filename: str,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
 ):
     """Serve a reference image for a cat."""
     result = await db.execute(select(Cat).where(Cat.id == cat_id))
