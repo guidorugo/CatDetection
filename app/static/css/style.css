@@ -302,7 +302,7 @@ body {
 }
 
 .status-connected, .status-completed { background: rgba(22, 163, 74, 0.2); color: var(--success); }
-.status-degraded, .status-recording { background: rgba(217, 119, 6, 0.2); color: var(--warning); }
+.status-degraded, .status-recording, .status-completed_with_warnings { background: rgba(217, 119, 6, 0.2); color: var(--warning); }
 .status-disconnected, .status-failed, .status-disabled { background: rgba(220, 38, 38, 0.2); color: var(--danger); }
 .status-offline { background: rgba(100, 116, 139, 0.2); color: var(--text-muted); }
 .status-pending, .status-running { background: rgba(37, 99, 235, 0.2); color: var(--primary); }
