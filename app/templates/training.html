@@ -4,7 +4,10 @@
 {% block content %}
 <div class="page-header">
     <h1>Model Training</h1>
-    <button class="btn btn-primary" onclick="showTrainForm()">Start Training</button>
+    <div style="display:flex; gap:8px">
+        <button class="btn btn-primary" onclick="showTrainForm()">Start Training</button>
+        <button class="btn btn-secondary" onclick="showSearchForm()">Hyperparameter Search</button>
+    </div>
 </div>
 
 <div id="trainForm" class="form-card" style="display:none">
@@ -85,6 +88,87 @@
     </form>
 </div>
 
+<div id="searchForm" class="form-card" style="display:none">
+    <h3>Hyperparameter Search</h3>
+    <form onsubmit="startSearch(event)">
+        <div class="form-group" style="margin-bottom:16px">
+            <label>Training Location</label>
+            <small style="color:var(--text-muted)">Where to run all trials</small>
+            <div style="display:flex; gap:16px; margin-top:4px">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+                    <input type="radio" name="searchLocation" value="local" checked style="width:auto" onchange="toggleSearchRemoteSettings()">
+                    <span>Train locally</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+                    <input type="radio" name="searchLocation" value="remote" style="width:auto" onchange="toggleSearchRemoteSettings()">
+                    <span>Train on remote server</span>
+                </label>
+            </div>
+        </div>
+        <div id="searchRemoteSettings" style="display:none; border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px; background:var(--bg-secondary, #f8f9fa)">
+            <h4 style="margin-top:0; margin-bottom:12px">Remote Server Settings</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Server SSH</label>
+                    <input type="text" id="searchRemoteSSH" value="{{ server_ssh }}" placeholder="user@10.0.0.82">
+                    <small style="color:var(--text-muted)">SSH target for rsync (user@host)</small>
+                </div>
+                <div class="form-group">
+                    <label>Server Port</label>
+                    <input type="number" id="searchRemotePort" value="{{ server_port }}" min="1" max="65535">
+                    <small style="color:var(--text-muted)">Training server API port</small>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Server Directory</label>
+                    <input type="text" id="searchRemoteDir" value="{{ server_dir }}" placeholder="~/cat-detection-project">
+                    <small style="color:var(--text-muted)">Project directory on remote server</small>
+                </div>
+                <div class="form-group">
+                    <label>API Key</label>
+                    <input type="password" id="searchRemoteAPIKey" value="{{ api_key }}" placeholder="shared secret">
+                    <small style="color:var(--text-muted)">Shared TRAINING_API_KEY for server auth</small>
+                </div>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Learning Rates</label>
+                <input type="text" id="searchLR" value="0.0005, 0.001" oninput="updateCombinations()">
+                <small style="color:var(--text-muted)">Comma-separated values to try</small>
+            </div>
+            <div class="form-group">
+                <label>Epochs</label>
+                <input type="text" id="searchEpochs" value="30, 50" oninput="updateCombinations()">
+                <small style="color:var(--text-muted)">Comma-separated values to try</small>
+            </div>
+            <div class="form-group">
+                <label>Freeze Epochs</label>
+                <input type="text" id="searchFreeze" value="5, 10" oninput="updateCombinations()">
+                <small style="color:var(--text-muted)">Comma-separated values to try</small>
+            </div>
+        </div>
+        <div style="margin-bottom:16px; padding:12px; background:var(--bg-secondary, #f8f9fa); border-radius:8px; font-weight:600">
+            Total combinations: <span id="combinationCount">8</span>
+        </div>
+        <label style="display:flex; align-items:center; gap:8px; margin-bottom:16px; cursor:pointer">
+            <input type="checkbox" id="searchPrepare" checked style="width:auto">
+            <span>Prepare data (YOLO crop + split)<br><small style="color:var(--text-muted)">Data is prepared once before the first trial</small></span>
+        </label>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Start Search</button>
+            <button type="button" class="btn btn-secondary" onclick="hideSearchForm()">Cancel</button>
+        </div>
+        <p class="form-note">Note: All trials run sequentially. Detection pipeline is paused for the entire search. The best model is activated automatically.</p>
+    </form>
+</div>
+
+<div class="section" id="searchSection" style="display:none">
+    <h2>Hyperparameter Searches</h2>
+    <div id="searchList"></div>
+</div>
+
 <div class="section">
     <h2>Training Jobs</h2>
     <div id="jobList">
@@ -104,10 +188,189 @@
 {% block scripts %}
 <script>
 let pollTimer = null;
+let searchPollTimer = null;
 const PAGE_SIZE = 10;
 let currentPage = 0;
 
-document.addEventListener('DOMContentLoaded', () => { loadJobs(); loadModels(); });
+document.addEventListener('DOMContentLoaded', () => { loadJobs(); loadSearches(); loadModels(); });
+
+// --- Hyperparameter Search ---
+
+function parseCSV(str, type) {
+    return str.split(',').map(s => s.trim()).filter(s => s !== '').map(s => type === 'float' ? parseFloat(s) : parseInt(s)).filter(n => !isNaN(n));
+}
+
+function updateCombinations() {
+    const lrs = parseCSV(document.getElementById('searchLR').value, 'float');
+    const epochs = parseCSV(document.getElementById('searchEpochs').value, 'int');
+    const freezes = parseCSV(document.getElementById('searchFreeze').value, 'int');
+    const count = Math.max(1, lrs.length) * Math.max(1, epochs.length) * Math.max(1, freezes.length);
+    document.getElementById('combinationCount').textContent = (lrs.length && epochs.length && freezes.length) ? count : 0;
+}
+
+function showSearchForm() {
+    document.getElementById('searchForm').style.display = 'block';
+    document.getElementById('trainForm').style.display = 'none';
+    toggleSearchRemoteSettings();
+    updateCombinations();
+}
+function hideSearchForm() { document.getElementById('searchForm').style.display = 'none'; }
+
+function toggleSearchRemoteSettings() {
+    const location = document.querySelector('input[name="searchLocation"]:checked').value;
+    document.getElementById('searchRemoteSettings').style.display = location === 'remote' ? 'block' : 'none';
+}
+
+async function startSearch(e) {
+    e.preventDefault();
+    const lrs = parseCSV(document.getElementById('searchLR').value, 'float');
+    const epochs = parseCSV(document.getElementById('searchEpochs').value, 'int');
+    const freezes = parseCSV(document.getElementById('searchFreeze').value, 'int');
+    if (!lrs.length || !epochs.length || !freezes.length) {
+        alert('Please enter at least one value for each parameter.');
+        return;
+    }
+    const location = document.querySelector('input[name="searchLocation"]:checked').value;
+    const body = {
+        learning_rates: lrs,
+        epochs_list: epochs,
+        freeze_epochs_list: freezes,
+        prepare_data: document.getElementById('searchPrepare').checked,
+        training_location: location,
+    };
+    if (location === 'remote') {
+        const ssh = document.getElementById('searchRemoteSSH').value.trim();
+        const port = parseInt(document.getElementById('searchRemotePort').value);
+        const dir = document.getElementById('searchRemoteDir').value.trim();
+        const key = document.getElementById('searchRemoteAPIKey').value.trim();
+        if (ssh) body.server_ssh = ssh;
+        if (port) body.server_port = port;
+        if (dir) body.server_dir = dir;
+        if (key) body.api_key = key;
+    }
+    try {
+        await apiFetch('/api/v1/training/search', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+        hideSearchForm();
+        loadSearches();
+        loadJobs();
+    } catch (e) {
+        alert('Failed to start search: ' + e.message);
+    }
+}
+
+async function cancelSearch(searchId) {
+    if (!confirm('Cancel this hyperparameter search? Running and pending trials will be cancelled.')) return;
+    try {
+        await apiFetch(`/api/v1/training/searches/${searchId}/cancel`, { method: 'POST' });
+        loadSearches();
+        loadJobs();
+    } catch (e) {
+        alert('Failed to cancel search: ' + e.message);
+    }
+}
+
+async function loadSearches() {
+    try {
+        const data = await apiFetch('/api/v1/training/searches?limit=10&offset=0');
+        const searches = data.items;
+        const section = document.getElementById('searchSection');
+        const list = document.getElementById('searchList');
+
+        if (!searches || searches.length === 0) {
+            section.style.display = 'none';
+            stopSearchPolling();
+            return;
+        }
+
+        section.style.display = 'block';
+        let hasActive = false;
+
+        list.innerHTML = searches.map(s => {
+            const isActive = s.status === 'running' || s.status === 'pending';
+            if (isActive) hasActive = true;
+            const pct = s.total_trials > 0 ? Math.round(((s.completed_trials + s.failed_trials) / s.total_trials) * 100) : 0;
+            const grid = JSON.parse(s.param_grid);
+
+            const progressBar = `
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width:${pct}%"></div>
+                </div>
+                <span class="progress-text">${s.completed_trials + s.failed_trials}/${s.total_trials} trials${s.failed_trials > 0 ? ` (${s.failed_trials} failed)` : ''} — Best: ${s.best_metric != null ? (s.best_metric * 100).toFixed(1) + '%' : 'N/A'}</span>
+            `;
+
+            const cancelBtn = isActive ? `<button class="btn btn-danger btn-sm" onclick="cancelSearch(${s.id})">Cancel</button>` : '';
+
+            // Trial table
+            let trialTable = '';
+            if (s.trials && s.trials.length > 0) {
+                const trialRows = s.trials.map(t => {
+                    const cfg = JSON.parse(t.config || '{}');
+                    const isBest = t.id === s.best_trial_id;
+                    const rank1 = t.best_metric != null ? (t.best_metric * 100).toFixed(1) + '%' : '-';
+                    return `<tr${isBest ? ' style="background:var(--bg-secondary, #f0f7ff); font-weight:600"' : ''}>
+                        <td>${t.trial_number}</td>
+                        <td>${cfg.learning_rate || '-'}</td>
+                        <td>${cfg.epochs || '-'}</td>
+                        <td>${cfg.freeze_epochs || '-'}</td>
+                        <td><span class="status-badge status-${t.status}">${t.status}</span></td>
+                        <td>${rank1}${isBest ? ' (best)' : ''}</td>
+                    </tr>`;
+                }).join('');
+
+                trialTable = `
+                <details style="margin-top:12px">
+                    <summary style="cursor:pointer; color:var(--primary); font-weight:500">Show trials</summary>
+                    <table class="data-table" style="margin-top:8px; font-size:0.9em">
+                        <thead><tr><th>#</th><th>LR</th><th>Epochs</th><th>Freeze</th><th>Status</th><th>Rank-1</th></tr></thead>
+                        <tbody>${trialRows}</tbody>
+                    </table>
+                </details>`;
+            }
+
+            const gridSummary = `LR: [${(grid.learning_rates||[]).join(', ')}] | Epochs: [${(grid.epochs_list||[]).join(', ')}] | Freeze: [${(grid.freeze_epochs_list||[]).join(', ')}]`;
+
+            return `
+            <div class="list-card">
+                <div class="list-card-info" style="flex:1">
+                    <h3>Search #${s.id} — ${s.training_location}</h3>
+                    <p style="font-size:0.85em; color:var(--text-muted)">${gridSummary}</p>
+                    <p class="meta">Started: ${new Date(s.created_at).toLocaleString()}</p>
+                    ${progressBar}
+                    ${trialTable}
+                </div>
+                <div class="list-card-actions">
+                    ${cancelBtn}
+                    <span class="status-badge status-${s.status}">${s.status}</span>
+                </div>
+            </div>`;
+        }).join('');
+
+        if (hasActive) {
+            startSearchPolling();
+        } else {
+            stopSearchPolling();
+        }
+    } catch (e) {
+        document.getElementById('searchSection').style.display = 'none';
+    }
+}
+
+function startSearchPolling() {
+    if (searchPollTimer) return;
+    searchPollTimer = setInterval(() => { loadSearches(); loadJobs(); }, 5000);
+}
+
+function stopSearchPolling() {
+    if (searchPollTimer) {
+        clearInterval(searchPollTimer);
+        searchPollTimer = null;
+    }
+}
+
+// --- Training Jobs ---
 
 async function loadJobs() {
     const offset = currentPage * PAGE_SIZE;
@@ -135,13 +398,15 @@ async function loadJobs() {
             </div>
             <span class="progress-text">${pct}% (${job.epochs_completed}/${job.epochs_total} epochs)</span>
         ` : '';
-        const cancelBtn = isActive ? `
+        const cancelBtn = (isActive && !job.search_id) ? `
             <button class="btn btn-danger btn-sm" onclick="cancelJob(${job.id})">Cancel</button>
         ` : '';
+        const trialLabel = job.search_id ? `<span style="color:var(--text-muted); font-size:0.85em">Trial ${job.trial_number} of search #${job.search_id}</span>` : '';
         return `
         <div class="list-card">
             <div class="list-card-info" style="flex:1">
                 <h3>${job.model_type} - v${job.model_version || 'pending'}</h3>
+                ${trialLabel}
                 <p>Epochs: ${job.epochs_completed}/${job.epochs_total} | Best: ${job.best_metric ? job.best_metric.toFixed(4) : 'N/A'}</p>
                 <p class="meta">Started: ${new Date(job.created_at).toLocaleString()}</p>
                 ${job.error_message ? `<p class="error-text">${job.error_message}</p>` : ''}
@@ -170,9 +435,9 @@ async function loadJobs() {
         pagination.style.display = 'none';
     }
 
-    if (hasActive) {
+    if (hasActive && !searchPollTimer) {
         startPolling();
-    } else {
+    } else if (!hasActive) {
         stopPolling();
     }
 }
@@ -196,6 +461,7 @@ function stopPolling() {
 
 function showTrainForm() {
     document.getElementById('trainForm').style.display = 'block';
+    document.getElementById('searchForm').style.display = 'none';
     toggleRemoteSettings();
     updateServerHost();
 }
@@ -253,6 +519,8 @@ async function cancelJob(jobId) {
         alert('Failed to cancel: ' + e.message);
     }
 }
+
+// --- Models ---
 
 async function loadModels() {
     try {
