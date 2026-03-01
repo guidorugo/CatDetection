@@ -164,11 +164,6 @@
     </form>
 </div>
 
-<div class="section" id="searchSection" style="display:none">
-    <h2>Hyperparameter Searches</h2>
-    <div id="searchList"></div>
-</div>
-
 <div class="section">
     <h2>Training Jobs</h2>
     <div id="jobList">
@@ -188,13 +183,10 @@
 {% block scripts %}
 <script>
 let pollTimer = null;
-let searchPollTimer = null;
 const PAGE_SIZE = 10;
 let currentPage = 0;
 
-document.addEventListener('DOMContentLoaded', () => { loadJobs(); loadSearches(); loadModels(); });
-
-// --- Hyperparameter Search ---
+document.addEventListener('DOMContentLoaded', () => { loadAll(); loadModels(); });
 
 function parseCSV(str, type) {
     return str.split(',').map(s => s.trim()).filter(s => s !== '').map(s => type === 'float' ? parseFloat(s) : parseInt(s)).filter(n => !isNaN(n));
@@ -208,6 +200,182 @@ function updateCombinations() {
     document.getElementById('combinationCount').textContent = (lrs.length && epochs.length && freezes.length) ? count : 0;
 }
 
+// --- Load unified list (standalone jobs + searches merged by date) ---
+
+async function loadAll() {
+    const offset = currentPage * PAGE_SIZE;
+    const [jobsData, searchesData] = await Promise.all([
+        apiFetch(`/api/v1/training/jobs?limit=${PAGE_SIZE}&offset=${offset}`),
+        apiFetch('/api/v1/training/searches?limit=50&offset=0'),
+    ]);
+
+    const jobs = (jobsData.items || []).map(j => ({ type: 'job', data: j, date: new Date(j.created_at) }));
+    const searches = (searchesData.items || []).map(s => ({ type: 'search', data: s, date: new Date(s.created_at) }));
+
+    // Merge and sort by date descending
+    const all = [...jobs, ...searches].sort((a, b) => b.date - a.date);
+
+    const list = document.getElementById('jobList');
+    const pagination = document.getElementById('jobPagination');
+
+    if (all.length === 0) {
+        list.innerHTML = '<p class="empty-state">No training jobs.</p>';
+        pagination.style.display = 'none';
+        stopPolling();
+        return;
+    }
+
+    let hasActive = false;
+    list.innerHTML = all.map(item => {
+        if (item.type === 'search') return renderSearch(item.data);
+        return renderJob(item.data);
+    }).join('');
+
+    // Check for active items
+    hasActive = all.some(item => {
+        const s = item.data.status;
+        return s === 'running' || s === 'pending';
+    });
+
+    // Pagination (based on standalone jobs total)
+    const total = jobsData.total + (searchesData.total || 0);
+    const totalPages = Math.ceil(jobsData.total / PAGE_SIZE);
+    if (totalPages > 1) {
+        let btns = '';
+        btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>&laquo; Prev</button>`;
+        for (let i = 0; i < totalPages; i++) {
+            btns += `<button class="btn btn-sm ${i === currentPage ? 'btn-primary' : 'btn-secondary'}" onclick="goToPage(${i})">${i + 1}</button>`;
+        }
+        btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next &raquo;</button>`;
+        pagination.innerHTML = btns;
+        pagination.style.display = 'flex';
+    } else {
+        pagination.style.display = 'none';
+    }
+
+    if (hasActive) {
+        startPolling();
+    } else {
+        stopPolling();
+    }
+}
+
+function renderJob(job) {
+    const isActive = job.status === 'running' || job.status === 'pending';
+    const pct = job.epochs_total > 0 ? Math.round((job.epochs_completed / job.epochs_total) * 100) : 0;
+    const progressBar = isActive ? `
+        <div class="progress-bar">
+            <div class="progress-fill" style="width:${pct}%"></div>
+        </div>
+        <span class="progress-text">${pct}% (${job.epochs_completed}/${job.epochs_total} epochs)</span>
+    ` : '';
+    const cancelBtn = isActive ? `
+        <button class="btn btn-danger btn-sm" onclick="cancelJob(${job.id})">Cancel</button>
+    ` : '';
+    return `
+    <div class="list-card">
+        <div class="list-card-info" style="flex:1">
+            <h3>${job.model_type} - v${job.model_version || 'pending'}</h3>
+            <p>Epochs: ${job.epochs_completed}/${job.epochs_total} | Best: ${job.best_metric ? job.best_metric.toFixed(4) : 'N/A'}</p>
+            <p class="meta">Started: ${new Date(job.created_at).toLocaleString()}</p>
+            ${job.error_message ? `<p class="error-text">${job.error_message}</p>` : ''}
+            ${progressBar}
+        </div>
+        <div class="list-card-actions">
+            ${cancelBtn}
+            <span class="status-badge status-${job.status}">${job.status}</span>
+        </div>
+    </div>`;
+}
+
+function renderSearch(s) {
+    const isActive = s.status === 'running' || s.status === 'pending';
+    const done = s.completed_trials + s.failed_trials;
+    const pct = s.total_trials > 0 ? Math.round((done / s.total_trials) * 100) : 0;
+    const grid = JSON.parse(s.param_grid);
+    const cancelBtn = isActive ? `<button class="btn btn-danger btn-sm" onclick="cancelSearch(${s.id})">Cancel</button>` : '';
+    const bestStr = s.best_metric != null ? (s.best_metric * 100).toFixed(1) + '%' : 'N/A';
+
+    const progressBar = `
+        <div class="progress-bar">
+            <div class="progress-fill" style="width:${pct}%"></div>
+        </div>
+        <span class="progress-text">${done}/${s.total_trials} trials${s.failed_trials > 0 ? ` (${s.failed_trials} failed)` : ''} — Best rank-1: ${bestStr}</span>
+    `;
+
+    // Trial table
+    let trialTable = '';
+    if (s.trials && s.trials.length > 0) {
+        const trialRows = s.trials.map(t => {
+            const cfg = JSON.parse(t.config || '{}');
+            const isBest = t.id === s.best_trial_id;
+            const rank1 = t.best_metric != null ? (t.best_metric * 100).toFixed(1) + '%' : '-';
+            const epochProgress = t.status === 'running' ? `${t.epochs_completed}/${t.epochs_total}` : (t.epochs_total || '-');
+            return `<tr${isBest ? ' style="background:var(--bg-secondary, #f0f7ff); font-weight:600"' : ''}>
+                <td>${t.trial_number}</td>
+                <td>${cfg.learning_rate || '-'}</td>
+                <td>${epochProgress}</td>
+                <td>${cfg.freeze_epochs || '-'}</td>
+                <td><span class="status-badge status-${t.status}">${t.status}</span></td>
+                <td>${rank1}${isBest ? ' (best)' : ''}</td>
+            </tr>`;
+        }).join('');
+
+        trialTable = `
+        <details style="margin-top:12px">
+            <summary style="cursor:pointer; color:var(--primary); font-weight:500">Show ${s.total_trials} trials</summary>
+            <table class="data-table" style="margin-top:8px; font-size:0.9em">
+                <thead><tr><th>#</th><th>LR</th><th>Epochs</th><th>Freeze</th><th>Status</th><th>Rank-1</th></tr></thead>
+                <tbody>${trialRows}</tbody>
+            </table>
+        </details>`;
+    }
+
+    const gridSummary = `LR: [${(grid.learning_rates||[]).join(', ')}] | Epochs: [${(grid.epochs_list||[]).join(', ')}] | Freeze: [${(grid.freeze_epochs_list||[]).join(', ')}]`;
+
+    return `
+    <div class="list-card">
+        <div class="list-card-info" style="flex:1">
+            <h3>Hyperparameter Search — ${s.training_location} — ${s.total_trials} trials</h3>
+            <p style="font-size:0.85em; color:var(--text-muted)">${gridSummary}</p>
+            <p class="meta">Started: ${new Date(s.created_at).toLocaleString()}</p>
+            ${progressBar}
+            ${trialTable}
+        </div>
+        <div class="list-card-actions">
+            ${cancelBtn}
+            <span class="status-badge status-${s.status}">${s.status}</span>
+        </div>
+    </div>`;
+}
+
+// --- Actions ---
+
+function goToPage(page) {
+    currentPage = page;
+    loadAll();
+}
+
+function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(loadAll, 5000);
+}
+
+function stopPolling() {
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+}
+
+function showTrainForm() {
+    document.getElementById('trainForm').style.display = 'block';
+    document.getElementById('searchForm').style.display = 'none';
+    toggleRemoteSettings();
+    updateServerHost();
+}
+function hideTrainForm() { document.getElementById('trainForm').style.display = 'none'; }
+
 function showSearchForm() {
     document.getElementById('searchForm').style.display = 'block';
     document.getElementById('trainForm').style.display = 'none';
@@ -216,9 +384,52 @@ function showSearchForm() {
 }
 function hideSearchForm() { document.getElementById('searchForm').style.display = 'none'; }
 
+function toggleRemoteSettings() {
+    const location = document.querySelector('input[name="trainLocation"]:checked').value;
+    document.getElementById('remoteSettings').style.display = location === 'remote' ? 'block' : 'none';
+}
+
 function toggleSearchRemoteSettings() {
     const location = document.querySelector('input[name="searchLocation"]:checked').value;
     document.getElementById('searchRemoteSettings').style.display = location === 'remote' ? 'block' : 'none';
+}
+
+function updateServerHost() {
+    const ssh = document.getElementById('remoteSSH').value;
+    const host = ssh.includes('@') ? ssh.split('@').pop() : ssh;
+    document.getElementById('remoteHost').value = host;
+}
+
+async function startTraining(e) {
+    e.preventDefault();
+    const location = document.querySelector('input[name="trainLocation"]:checked').value;
+    const body = {
+        epochs: parseInt(document.getElementById('trainEpochs').value),
+        learning_rate: parseFloat(document.getElementById('trainLR').value),
+        freeze_epochs: parseInt(document.getElementById('trainFreeze').value),
+        prepare_data: document.getElementById('trainPrepare').checked,
+        training_location: location,
+    };
+    if (location === 'remote') {
+        const ssh = document.getElementById('remoteSSH').value.trim();
+        const port = parseInt(document.getElementById('remotePort').value);
+        const dir = document.getElementById('remoteDir').value.trim();
+        const key = document.getElementById('remoteAPIKey').value.trim();
+        if (ssh) body.server_ssh = ssh;
+        if (port) body.server_port = port;
+        if (dir) body.server_dir = dir;
+        if (key) body.api_key = key;
+    }
+    try {
+        await apiFetch('/api/v1/training/start', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+        hideTrainForm();
+        loadAll();
+    } catch (e) {
+        alert('Failed to start training: ' + e.message);
+    }
 }
 
 async function startSearch(e) {
@@ -254,259 +465,9 @@ async function startSearch(e) {
             body: JSON.stringify(body)
         });
         hideSearchForm();
-        loadSearches();
-        loadJobs();
+        loadAll();
     } catch (e) {
         alert('Failed to start search: ' + e.message);
-    }
-}
-
-async function cancelSearch(searchId) {
-    if (!confirm('Cancel this hyperparameter search? Running and pending trials will be cancelled.')) return;
-    try {
-        await apiFetch(`/api/v1/training/searches/${searchId}/cancel`, { method: 'POST' });
-        loadSearches();
-        loadJobs();
-    } catch (e) {
-        alert('Failed to cancel search: ' + e.message);
-    }
-}
-
-async function loadSearches() {
-    try {
-        const data = await apiFetch('/api/v1/training/searches?limit=10&offset=0');
-        const searches = data.items;
-        const section = document.getElementById('searchSection');
-        const list = document.getElementById('searchList');
-
-        if (!searches || searches.length === 0) {
-            section.style.display = 'none';
-            stopSearchPolling();
-            return;
-        }
-
-        section.style.display = 'block';
-        let hasActive = false;
-
-        list.innerHTML = searches.map(s => {
-            const isActive = s.status === 'running' || s.status === 'pending';
-            if (isActive) hasActive = true;
-            const pct = s.total_trials > 0 ? Math.round(((s.completed_trials + s.failed_trials) / s.total_trials) * 100) : 0;
-            const grid = JSON.parse(s.param_grid);
-
-            const progressBar = `
-                <div class="progress-bar">
-                    <div class="progress-fill" style="width:${pct}%"></div>
-                </div>
-                <span class="progress-text">${s.completed_trials + s.failed_trials}/${s.total_trials} trials${s.failed_trials > 0 ? ` (${s.failed_trials} failed)` : ''} — Best: ${s.best_metric != null ? (s.best_metric * 100).toFixed(1) + '%' : 'N/A'}</span>
-            `;
-
-            const cancelBtn = isActive ? `<button class="btn btn-danger btn-sm" onclick="cancelSearch(${s.id})">Cancel</button>` : '';
-
-            // Trial table
-            let trialTable = '';
-            if (s.trials && s.trials.length > 0) {
-                const trialRows = s.trials.map(t => {
-                    const cfg = JSON.parse(t.config || '{}');
-                    const isBest = t.id === s.best_trial_id;
-                    const rank1 = t.best_metric != null ? (t.best_metric * 100).toFixed(1) + '%' : '-';
-                    return `<tr${isBest ? ' style="background:var(--bg-secondary, #f0f7ff); font-weight:600"' : ''}>
-                        <td>${t.trial_number}</td>
-                        <td>${cfg.learning_rate || '-'}</td>
-                        <td>${cfg.epochs || '-'}</td>
-                        <td>${cfg.freeze_epochs || '-'}</td>
-                        <td><span class="status-badge status-${t.status}">${t.status}</span></td>
-                        <td>${rank1}${isBest ? ' (best)' : ''}</td>
-                    </tr>`;
-                }).join('');
-
-                trialTable = `
-                <details style="margin-top:12px">
-                    <summary style="cursor:pointer; color:var(--primary); font-weight:500">Show trials</summary>
-                    <table class="data-table" style="margin-top:8px; font-size:0.9em">
-                        <thead><tr><th>#</th><th>LR</th><th>Epochs</th><th>Freeze</th><th>Status</th><th>Rank-1</th></tr></thead>
-                        <tbody>${trialRows}</tbody>
-                    </table>
-                </details>`;
-            }
-
-            const gridSummary = `LR: [${(grid.learning_rates||[]).join(', ')}] | Epochs: [${(grid.epochs_list||[]).join(', ')}] | Freeze: [${(grid.freeze_epochs_list||[]).join(', ')}]`;
-
-            return `
-            <div class="list-card">
-                <div class="list-card-info" style="flex:1">
-                    <h3>Search #${s.id} — ${s.training_location}</h3>
-                    <p style="font-size:0.85em; color:var(--text-muted)">${gridSummary}</p>
-                    <p class="meta">Started: ${new Date(s.created_at).toLocaleString()}</p>
-                    ${progressBar}
-                    ${trialTable}
-                </div>
-                <div class="list-card-actions">
-                    ${cancelBtn}
-                    <span class="status-badge status-${s.status}">${s.status}</span>
-                </div>
-            </div>`;
-        }).join('');
-
-        if (hasActive) {
-            startSearchPolling();
-        } else {
-            stopSearchPolling();
-        }
-    } catch (e) {
-        document.getElementById('searchSection').style.display = 'none';
-    }
-}
-
-function startSearchPolling() {
-    if (searchPollTimer) return;
-    searchPollTimer = setInterval(() => { loadSearches(); loadJobs(); }, 5000);
-}
-
-function stopSearchPolling() {
-    if (searchPollTimer) {
-        clearInterval(searchPollTimer);
-        searchPollTimer = null;
-    }
-}
-
-// --- Training Jobs ---
-
-async function loadJobs() {
-    const offset = currentPage * PAGE_SIZE;
-    const data = await apiFetch(`/api/v1/training/jobs?limit=${PAGE_SIZE}&offset=${offset}`);
-    const jobs = data.items;
-    const total = data.total;
-    const list = document.getElementById('jobList');
-    const pagination = document.getElementById('jobPagination');
-
-    if (total === 0) {
-        list.innerHTML = '<p class="empty-state">No training jobs.</p>';
-        pagination.style.display = 'none';
-        stopPolling();
-        return;
-    }
-
-    let hasActive = false;
-    list.innerHTML = jobs.map(job => {
-        const isActive = job.status === 'running' || job.status === 'pending';
-        if (isActive) hasActive = true;
-        const pct = job.epochs_total > 0 ? Math.round((job.epochs_completed / job.epochs_total) * 100) : 0;
-        const progressBar = isActive ? `
-            <div class="progress-bar">
-                <div class="progress-fill" style="width:${pct}%"></div>
-            </div>
-            <span class="progress-text">${pct}% (${job.epochs_completed}/${job.epochs_total} epochs)</span>
-        ` : '';
-        const cancelBtn = (isActive && !job.search_id) ? `
-            <button class="btn btn-danger btn-sm" onclick="cancelJob(${job.id})">Cancel</button>
-        ` : '';
-        const trialLabel = job.search_id ? `<span style="color:var(--text-muted); font-size:0.85em">Trial ${job.trial_number} of search #${job.search_id}</span>` : '';
-        return `
-        <div class="list-card">
-            <div class="list-card-info" style="flex:1">
-                <h3>${job.model_type} - v${job.model_version || 'pending'}</h3>
-                ${trialLabel}
-                <p>Epochs: ${job.epochs_completed}/${job.epochs_total} | Best: ${job.best_metric ? job.best_metric.toFixed(4) : 'N/A'}</p>
-                <p class="meta">Started: ${new Date(job.created_at).toLocaleString()}</p>
-                ${job.error_message ? `<p class="error-text">${job.error_message}</p>` : ''}
-                ${progressBar}
-            </div>
-            <div class="list-card-actions">
-                ${cancelBtn}
-                <span class="status-badge status-${job.status}">${job.status}</span>
-            </div>
-        </div>
-        `;
-    }).join('');
-
-    // Pagination controls
-    const totalPages = Math.ceil(total / PAGE_SIZE);
-    if (totalPages > 1) {
-        let btns = '';
-        btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>&laquo; Prev</button>`;
-        for (let i = 0; i < totalPages; i++) {
-            btns += `<button class="btn btn-sm ${i === currentPage ? 'btn-primary' : 'btn-secondary'}" onclick="goToPage(${i})">${i + 1}</button>`;
-        }
-        btns += `<button class="btn btn-secondary btn-sm" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next &raquo;</button>`;
-        pagination.innerHTML = btns;
-        pagination.style.display = 'flex';
-    } else {
-        pagination.style.display = 'none';
-    }
-
-    if (hasActive && !searchPollTimer) {
-        startPolling();
-    } else if (!hasActive) {
-        stopPolling();
-    }
-}
-
-function goToPage(page) {
-    currentPage = page;
-    loadJobs();
-}
-
-function startPolling() {
-    if (pollTimer) return;
-    pollTimer = setInterval(loadJobs, 5000);
-}
-
-function stopPolling() {
-    if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-    }
-}
-
-function showTrainForm() {
-    document.getElementById('trainForm').style.display = 'block';
-    document.getElementById('searchForm').style.display = 'none';
-    toggleRemoteSettings();
-    updateServerHost();
-}
-function hideTrainForm() { document.getElementById('trainForm').style.display = 'none'; }
-
-function toggleRemoteSettings() {
-    const location = document.querySelector('input[name="trainLocation"]:checked').value;
-    document.getElementById('remoteSettings').style.display = location === 'remote' ? 'block' : 'none';
-}
-
-function updateServerHost() {
-    const ssh = document.getElementById('remoteSSH').value;
-    const host = ssh.includes('@') ? ssh.split('@').pop() : ssh;
-    document.getElementById('remoteHost').value = host;
-}
-
-async function startTraining(e) {
-    e.preventDefault();
-    const location = document.querySelector('input[name="trainLocation"]:checked').value;
-    const body = {
-        epochs: parseInt(document.getElementById('trainEpochs').value),
-        learning_rate: parseFloat(document.getElementById('trainLR').value),
-        freeze_epochs: parseInt(document.getElementById('trainFreeze').value),
-        prepare_data: document.getElementById('trainPrepare').checked,
-        training_location: location,
-    };
-    if (location === 'remote') {
-        const ssh = document.getElementById('remoteSSH').value.trim();
-        const port = parseInt(document.getElementById('remotePort').value);
-        const dir = document.getElementById('remoteDir').value.trim();
-        const key = document.getElementById('remoteAPIKey').value.trim();
-        if (ssh) body.server_ssh = ssh;
-        if (port) body.server_port = port;
-        if (dir) body.server_dir = dir;
-        if (key) body.api_key = key;
-    }
-    try {
-        await apiFetch('/api/v1/training/start', {
-            method: 'POST',
-            body: JSON.stringify(body)
-        });
-        hideTrainForm();
-        loadJobs();
-    } catch (e) {
-        alert('Failed to start training: ' + e.message);
     }
 }
 
@@ -514,9 +475,19 @@ async function cancelJob(jobId) {
     if (!confirm('Cancel this training job?')) return;
     try {
         await apiFetch(`/api/v1/training/jobs/${jobId}/cancel`, { method: 'POST' });
-        loadJobs();
+        loadAll();
     } catch (e) {
         alert('Failed to cancel: ' + e.message);
+    }
+}
+
+async function cancelSearch(searchId) {
+    if (!confirm('Cancel this hyperparameter search? Running and pending trials will be cancelled.')) return;
+    try {
+        await apiFetch(`/api/v1/training/searches/${searchId}/cancel`, { method: 'POST' });
+        loadAll();
+    } catch (e) {
+        alert('Failed to cancel search: ' + e.message);
     }
 }
 
