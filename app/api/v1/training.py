@@ -882,6 +882,167 @@ async def cancel_training_job(
     return job
 
 
+async def _resume_remote_training_job_search(
+    job_id: int, job_config: dict, base_config: dict, app
+) -> None:
+    """Resume polling a remote training job that belongs to a search.
+
+    Like _resume_remote_training_job but skips model registration/reload/embedding
+    generation (the search orchestrator handles those).
+    """
+    import re
+
+    import httpx
+
+    server_ssh = base_config.get("server_ssh") or job_config.get("server_ssh") or settings.TRAINING_SERVER_SSH
+    server_port = base_config.get("server_port") or job_config.get("server_port") or settings.TRAINING_SERVER_PORT
+    api_key = base_config.get("api_key") or job_config.get("api_key") or settings.TRAINING_API_KEY
+    base_url = f"http://{server_ssh.split('@')[-1]}:{server_port}"
+
+    logger.info("Resuming polling for search trial %d at %s", job_id, base_url)
+
+    step = f"polling {base_url}/status"
+    try:
+        poll_failures = 0
+        while True:
+            await asyncio.sleep(10)
+
+            # Check if job was cancelled locally
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == job_id)
+                )
+                job = result.scalar_one()
+                if job.status == "cancelled":
+                    logger.info("Resumed search trial %d cancelled locally", job_id)
+                    try:
+                        async with httpx.AsyncClient(timeout=10) as client:
+                            await client.post(
+                                f"{base_url}/cancel",
+                                headers={"X-API-Key": api_key},
+                            )
+                    except Exception:
+                        pass
+                    return
+
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        f"{base_url}/status",
+                        headers={"X-API-Key": api_key},
+                    )
+                    resp.raise_for_status()
+                    remote_status = resp.json()
+                poll_failures = 0
+            except (httpx.ConnectError, httpx.TimeoutException) as poll_err:
+                poll_failures += 1
+                logger.warning("Resume search trial poll failed (%d/3): %s: %s",
+                               poll_failures, type(poll_err).__name__, poll_err)
+                if poll_failures >= 3:
+                    raise RuntimeError(
+                        f"Lost connection to training server at {base_url} "
+                        f"({poll_failures} consecutive poll failures)"
+                    )
+                continue
+
+            rs = remote_status["status"]
+            progress_str = remote_status.get("progress")
+
+            epochs_done = 0
+            if progress_str:
+                m = re.match(r"(\d+)/(\d+)", progress_str)
+                if m:
+                    epochs_done = int(m.group(1))
+
+            async with async_session() as db:
+                result = await db.execute(
+                    select(TrainingJob).where(TrainingJob.id == job_id)
+                )
+                job = result.scalar_one()
+                job.epochs_completed = epochs_done
+                await db.commit()
+
+            if rs == "complete":
+                logger.info("Resumed search trial %d: training complete", job_id)
+                break
+            elif rs == "cancelled":
+                logger.info("Resumed search trial %d: cancelled by server", job_id)
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(TrainingJob).where(TrainingJob.id == job_id)
+                    )
+                    job = result.scalar_one()
+                    job.status = "cancelled"
+                    await db.commit()
+                return
+            elif rs == "error":
+                raise RuntimeError(f"Remote training failed: {remote_status.get('error')}")
+            elif rs == "idle":
+                logger.info("Resumed search trial %d: server is idle (training already finished)", job_id)
+                break
+
+        # Download model (same as _run_remote_training_job but skip registration/reload)
+        step = f"downloading model from {base_url}/model/latest"
+        logger.info("Resume search trial step: %s", step)
+        save_dir = Path(settings.MODELS_DIR) / "identification"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.get(
+                    f"{base_url}/model/latest",
+                    headers={"X-API-Key": api_key},
+                )
+                resp.raise_for_status()
+                filename = "cat_reid_remote.pth"
+                cd = resp.headers.get("content-disposition", "")
+                if "filename=" in cd:
+                    filename = cd.split("filename=")[-1].strip('" ')
+                model_path = str(save_dir / filename)
+                Path(model_path).write_bytes(resp.content)
+                logger.info("Downloaded model to %s", model_path)
+
+                step = f"downloading registry from {base_url}/model/registry"
+                resp = await client.get(
+                    f"{base_url}/model/registry",
+                    headers={"X-API-Key": api_key},
+                )
+                resp.raise_for_status()
+                remote_registry = resp.json()
+        except httpx.ConnectError:
+            raise RuntimeError(f"Cannot connect to training server at {base_url} during model download")
+        except httpx.TimeoutException:
+            raise RuntimeError(f"Timeout downloading model from {base_url}")
+
+        version = remote_status.get("model_version")
+        best_metric = None
+        if version and version in remote_registry.get("models", {}):
+            best_metric = remote_registry["models"][version].get("metrics", {}).get("rank1")
+
+        epochs_total = job_config.get("epochs", 0)
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "completed"
+            job.model_version = version
+            job.model_path = model_path
+            job.epochs_completed = epochs_total
+            job.best_metric = best_metric
+            await db.commit()
+
+        logger.info("Resumed search trial %d completed successfully", job_id)
+
+    except Exception as e:
+        logger.error("Resumed search trial %d failed at step '%s': %s: %s",
+                     job_id, step, type(e).__name__, e)
+        async with async_session() as db:
+            result = await db.execute(select(TrainingJob).where(TrainingJob.id == job_id))
+            job = result.scalar_one()
+            job.status = "failed"
+            job.error_message = f"[resume: {step}] {e}"
+            await db.commit()
+
+
 async def _run_hyperparam_search(search_id: int, app) -> None:
     """Orchestrate a hyperparameter search: run all trials sequentially, activate best model."""
     pipeline = getattr(app.state, "detection_pipeline", None)
@@ -915,11 +1076,32 @@ async def _run_hyperparam_search(search_id: int, app) -> None:
             trials = result.scalars().all()
             trial_ids = [t.id for t in trials]
             trial_configs = [json.loads(t.config) if t.config else {} for t in trials]
+            trial_statuses = [t.status for t in trials]
 
+        # Initialize best_metric from any previously completed trials (for resume)
         best_metric = None
         best_trial_id = None
+        async with async_session() as db:
+            result = await db.execute(
+                select(HyperparamSearch).where(HyperparamSearch.id == search_id)
+            )
+            s = result.scalar_one()
+            if s.best_metric is not None:
+                best_metric = s.best_metric
+                best_trial_id = s.best_trial_id
 
-        for i, (trial_id, trial_config) in enumerate(zip(trial_ids, trial_configs)):
+        # Track whether any pending trial needs data preparation
+        has_any_completed = any(s == "completed" for s in trial_statuses)
+
+        for i, (trial_id, trial_config, trial_status) in enumerate(
+            zip(trial_ids, trial_configs, trial_statuses)
+        ):
+            # Skip already completed or failed trials (resume scenario)
+            if trial_status in ("completed", "failed", "cancelled"):
+                logger.info("Search %d: skipping trial %d/%d (already %s)",
+                            search_id, i + 1, len(trial_ids), trial_status)
+                continue
+
             # Check if search was cancelled
             async with async_session() as db:
                 result = await db.execute(
@@ -929,11 +1111,6 @@ async def _run_hyperparam_search(search_id: int, app) -> None:
                 if search.status == "cancelled":
                     logger.info("Hyperparameter search %d cancelled, stopping at trial %d", search_id, i + 1)
                     # Cancel remaining pending trials
-                    await db.execute(
-                        select(TrainingJob)
-                        .where(TrainingJob.search_id == search_id)
-                        .where(TrainingJob.status == "pending")
-                    )
                     pending_trials = (await db.execute(
                         select(TrainingJob)
                         .where(TrainingJob.search_id == search_id)
@@ -944,13 +1121,19 @@ async def _run_hyperparam_search(search_id: int, app) -> None:
                     await db.commit()
                     return
 
+            # Determine if this trial was already running (resume scenario)
+            is_resumed_running = trial_status == "running"
+
             # Build TrainingStart for this trial
+            # Skip data prep if any trial already completed (data already prepared)
+            needs_prepare = (i == 0 and not has_any_completed
+                             and trial_config.get("prepare_data", True))
             trial_data = TrainingStart(
                 model_type="cat_reid",
                 epochs=trial_config.get("epochs", 50),
                 learning_rate=trial_config.get("learning_rate", 0.001),
                 freeze_epochs=trial_config.get("freeze_epochs", 10),
-                prepare_data=(i == 0 and trial_config.get("prepare_data", True)),
+                prepare_data=needs_prepare,
                 training_location=training_location,
                 server_ssh=base_config.get("server_ssh"),
                 server_port=base_config.get("server_port"),
@@ -958,12 +1141,22 @@ async def _run_hyperparam_search(search_id: int, app) -> None:
                 api_key=base_config.get("api_key"),
             )
 
-            logger.info("Search %d: starting trial %d/%d (lr=%.6f, epochs=%d, freeze=%d)",
-                         search_id, i + 1, len(trial_ids),
-                         trial_data.learning_rate, trial_data.epochs, trial_data.freeze_epochs)
+            if is_resumed_running:
+                logger.info("Search %d: resuming running trial %d/%d (lr=%.6f, epochs=%d, freeze=%d)",
+                             search_id, i + 1, len(trial_ids),
+                             trial_data.learning_rate, trial_data.epochs, trial_data.freeze_epochs)
+            else:
+                logger.info("Search %d: starting trial %d/%d (lr=%.6f, epochs=%d, freeze=%d)",
+                             search_id, i + 1, len(trial_ids),
+                             trial_data.learning_rate, trial_data.epochs, trial_data.freeze_epochs)
 
             try:
-                if training_location == "remote":
+                if is_resumed_running and training_location == "remote":
+                    # Resume polling instead of re-triggering on the remote server
+                    await _resume_remote_training_job_search(
+                        trial_id, trial_config, base_config, app
+                    )
+                elif training_location == "remote":
                     await _run_remote_training_job(trial_id, trial_data, app, skip_post_training=True)
                 else:
                     await _run_training_job(trial_id, trial_data, app, skip_post_training=True)
