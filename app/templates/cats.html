@@ -67,6 +67,18 @@
     }
     .upload-thumb:hover { border-color: var(--primary); color: var(--primary); }
     .image-count { font-size: 0.8em; color: var(--text-muted); }
+    .image-pager {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        margin-top: 8px;
+        font-size: 0.8em;
+    }
+    .image-pager button {
+        padding: 2px 8px;
+        font-size: 0.85em;
+    }
     .image-lightbox {
         position: fixed;
         top: 0; left: 0; right: 0; bottom: 0;
@@ -118,6 +130,10 @@
 
 {% block scripts %}
 <script>
+const IMAGES_PER_PAGE = 6;
+const catImagePages = {};  // catId -> current page index
+const catImageLists = {};  // catId -> full image list
+
 document.addEventListener('DOMContentLoaded', loadCats);
 
 async function loadCats() {
@@ -145,37 +161,67 @@ async function loadCats() {
                 <div class="image-grid" id="img-grid-${cat.id}">
                     <div class="upload-thumb" onclick="triggerUpload(${cat.id})" title="Upload images">+</div>
                 </div>
+                <div class="image-pager" id="img-pager-${cat.id}" style="display:none"></div>
                 <input type="file" id="img-upload-${cat.id}" multiple accept="image/jpeg,image/png"
                        style="display:none" onchange="uploadImages(${cat.id}, this)">
             </div>
         </div>
     `).join('');
 
-    // Load images for each cat
     cats.forEach(cat => loadCatImages(cat.id));
 }
 
 async function loadCatImages(catId) {
     try {
         const data = await apiFetch(`/api/v1/cats/${catId}/images`);
-        const grid = document.getElementById(`img-grid-${catId}`);
+        catImageLists[catId] = data.images;
+        catImagePages[catId] = catImagePages[catId] || 0;
         const count = document.getElementById(`img-count-${catId}`);
-        if (!grid) return;
-
-        count.textContent = `(${data.images.length})`;
-
-        const thumbs = data.images.map(name => `
-            <div class="image-thumb" onclick="showLightbox(${catId}, '${name}')">
-                <img src="/api/v1/cats/${catId}/images/${encodeURIComponent(name)}" alt="${name}" loading="lazy">
-                <button class="delete-btn" onclick="event.stopPropagation(); deleteImage(${catId}, '${name}')">&times;</button>
-            </div>
-        `).join('');
-
-        // Keep the upload button at the end
-        grid.innerHTML = thumbs + `<div class="upload-thumb" onclick="triggerUpload(${catId})" title="Upload images">+</div>`;
+        if (count) count.textContent = `(${data.images.length})`;
+        renderImagePage(catId);
     } catch (e) {
         console.error('Failed to load images for cat', catId, e);
     }
+}
+
+function renderImagePage(catId) {
+    const images = catImageLists[catId] || [];
+    const page = catImagePages[catId] || 0;
+    const totalPages = Math.ceil(images.length / IMAGES_PER_PAGE);
+    const start = page * IMAGES_PER_PAGE;
+    const pageImages = images.slice(start, start + IMAGES_PER_PAGE);
+
+    const grid = document.getElementById(`img-grid-${catId}`);
+    if (!grid) return;
+
+    const thumbs = pageImages.map(name => `
+        <div class="image-thumb" onclick="showLightbox(${catId}, '${name}')">
+            <img src="/api/v1/cats/${catId}/images/${encodeURIComponent(name)}" alt="${name}" loading="lazy">
+            <button class="delete-btn" onclick="event.stopPropagation(); deleteImage(${catId}, '${name}')">&times;</button>
+        </div>
+    `).join('');
+
+    grid.innerHTML = thumbs + `<div class="upload-thumb" onclick="triggerUpload(${catId})" title="Upload images">+</div>`;
+
+    // Pager
+    const pager = document.getElementById(`img-pager-${catId}`);
+    if (totalPages > 1) {
+        const prevDisabled = page === 0 ? 'disabled' : '';
+        const nextDisabled = page >= totalPages - 1 ? 'disabled' : '';
+        pager.innerHTML = `
+            <button class="btn btn-sm btn-secondary" onclick="changeImagePage(${catId}, ${page - 1})" ${prevDisabled}>&laquo;</button>
+            <span>${page + 1} / ${totalPages}</span>
+            <button class="btn btn-sm btn-secondary" onclick="changeImagePage(${catId}, ${page + 1})" ${nextDisabled}>&raquo;</button>
+        `;
+        pager.style.display = 'flex';
+    } else {
+        pager.style.display = 'none';
+    }
+}
+
+function changeImagePage(catId, page) {
+    catImagePages[catId] = page;
+    renderImagePage(catId);
 }
 
 function triggerUpload(catId) {
