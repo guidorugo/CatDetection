@@ -22,6 +22,7 @@ class TrainingJobResponse(BaseModel):
     status: str
     model_type: str
     model_version: str | None
+    config: str | None = None
     epochs_total: int
     epochs_completed: int
     best_metric: float | None

@@ -26,6 +26,24 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+def _build_search_response(search: HyperparamSearch, trials: list) -> HyperparamSearchResponse:
+    """Build search response without triggering ORM lazy loading."""
+    return HyperparamSearchResponse(
+        id=search.id,
+        status=search.status,
+        param_grid=search.param_grid,
+        training_location=search.training_location,
+        total_trials=search.total_trials,
+        completed_trials=search.completed_trials,
+        failed_trials=search.failed_trials,
+        best_trial_id=search.best_trial_id,
+        best_metric=search.best_metric,
+        created_at=search.created_at,
+        updated_at=search.updated_at,
+        trials=[TrainingJobResponse.model_validate(t) for t in trials],
+    )
+
+
 async def _reload_model_after_training(app, model_path: str):
     """Reload identifier model and rebuild embedding store."""
     pipeline = getattr(app.state, "detection_pipeline", None)
@@ -1160,20 +1178,18 @@ async def start_hyperparam_search(
         db.add(trial)
 
     await db.commit()
-
-    # Reload with trials
     await db.refresh(search)
     result = await db.execute(
         select(TrainingJob)
         .where(TrainingJob.search_id == search.id)
         .order_by(TrainingJob.trial_number)
     )
-    search.trials = result.scalars().all()
+    trials = result.scalars().all()
 
     asyncio.create_task(_run_hyperparam_search(search.id, request.app))
     logger.info("Hyperparameter search %d started: %d trials", search.id, len(combinations))
 
-    return search
+    return _build_search_response(search, trials)
 
 
 @router.get("/searches")
@@ -1202,8 +1218,8 @@ async def list_hyperparam_searches(
             .where(TrainingJob.search_id == s.id)
             .order_by(TrainingJob.trial_number)
         )
-        s.trials = trial_result.scalars().all()
-        items.append(HyperparamSearchResponse.model_validate(s))
+        trials = trial_result.scalars().all()
+        items.append(_build_search_response(s, trials))
 
     return {
         "items": items,
@@ -1232,8 +1248,8 @@ async def get_hyperparam_search(
         .where(TrainingJob.search_id == search.id)
         .order_by(TrainingJob.trial_number)
     )
-    search.trials = trial_result.scalars().all()
-    return search
+    trials = trial_result.scalars().all()
+    return _build_search_response(search, trials)
 
 
 @router.post("/searches/{search_id}/cancel")
