@@ -784,10 +784,12 @@ async def list_training_jobs(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    total_result = await db.execute(select(func.count(TrainingJob.id)))
+    # Exclude jobs that belong to a hyperparameter search (shown in search section)
+    standalone = TrainingJob.search_id.is_(None)
+    total_result = await db.execute(select(func.count(TrainingJob.id)).where(standalone))
     total = total_result.scalar()
     result = await db.execute(
-        select(TrainingJob).order_by(TrainingJob.created_at.desc()).offset(offset).limit(limit)
+        select(TrainingJob).where(standalone).order_by(TrainingJob.created_at.desc()).offset(offset).limit(limit)
     )
     jobs = result.scalars().all()
     return {
