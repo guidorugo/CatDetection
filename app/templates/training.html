@@ -185,6 +185,7 @@
 let pollTimer = null;
 const PAGE_SIZE = 10;
 let currentPage = 0;
+const expandedSearches = new Set();
 
 document.addEventListener('DOMContentLoaded', () => { loadAll(); loadModels(); });
 
@@ -264,7 +265,7 @@ function renderJob(job) {
     const isActive = job.status === 'running' || job.status === 'pending';
     const pct = job.epochs_total > 0 ? Math.round((job.epochs_completed / job.epochs_total) * 100) : 0;
     const progressBar = isActive ? `
-        <div class="progress-bar">
+        <div class="progress-bar" style="margin-top:8px">
             <div class="progress-fill" style="width:${pct}%"></div>
         </div>
         <span class="progress-text">${pct}% (${job.epochs_completed}/${job.epochs_total} epochs)</span>
@@ -281,7 +282,7 @@ function renderJob(job) {
             ${job.error_message ? `<p class="error-text">${job.error_message}</p>` : ''}
             ${progressBar}
         </div>
-        <div class="list-card-actions">
+        <div class="list-card-actions" style="align-self:flex-start">
             ${cancelBtn}
             <span class="status-badge status-${job.status}">${job.status}</span>
         </div>
@@ -297,15 +298,16 @@ function renderSearch(s) {
     const bestStr = s.best_metric != null ? (s.best_metric * 100).toFixed(1) + '%' : 'N/A';
 
     const progressBar = `
-        <div class="progress-bar">
+        <div class="progress-bar" style="margin-top:8px">
             <div class="progress-fill" style="width:${pct}%"></div>
         </div>
         <span class="progress-text">${done}/${s.total_trials} trials${s.failed_trials > 0 ? ` (${s.failed_trials} failed)` : ''} — Best rank-1: ${bestStr}</span>
     `;
 
-    // Trial table
+    // Trial table (preserve expanded state across refreshes)
     let trialTable = '';
     if (s.trials && s.trials.length > 0) {
+        const isExpanded = expandedSearches.has(s.id);
         const trialRows = s.trials.map(t => {
             const cfg = JSON.parse(t.config || '{}');
             const isBest = t.id === s.best_trial_id;
@@ -322,7 +324,7 @@ function renderSearch(s) {
         }).join('');
 
         trialTable = `
-        <details style="margin-top:12px">
+        <details style="margin-top:12px"${isExpanded ? ' open' : ''} ontoggle="toggleSearchDetails(${s.id}, this)">
             <summary style="cursor:pointer; color:var(--primary); font-weight:500">Show ${s.total_trials} trials</summary>
             <table class="data-table" style="margin-top:8px; font-size:0.9em">
                 <thead><tr><th>#</th><th>LR</th><th>Epochs</th><th>Freeze</th><th>Status</th><th>Rank-1</th></tr></thead>
@@ -342,11 +344,19 @@ function renderSearch(s) {
             ${progressBar}
             ${trialTable}
         </div>
-        <div class="list-card-actions">
+        <div class="list-card-actions" style="align-self:flex-start">
             ${cancelBtn}
             <span class="status-badge status-${s.status}">${s.status}</span>
         </div>
     </div>`;
+}
+
+function toggleSearchDetails(searchId, el) {
+    if (el.open) {
+        expandedSearches.add(searchId);
+    } else {
+        expandedSearches.delete(searchId);
+    }
 }
 
 // --- Actions ---
