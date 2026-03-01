@@ -335,6 +335,11 @@ function renderSearch(s) {
 
     const gridSummary = `LR: [${(grid.learning_rates||[]).join(', ')}] | Epochs: [${(grid.epochs_list||[]).join(', ')}] | Freeze: [${(grid.freeze_epochs_list||[]).join(', ')}]`;
 
+    const statusLabels = {
+        'completed_with_warnings': 'warning',
+    };
+    const statusLabel = statusLabels[s.status] || s.status;
+
     return `
     <div class="list-card">
         <div class="list-card-info" style="flex:1">
@@ -346,7 +351,7 @@ function renderSearch(s) {
         </div>
         <div class="list-card-actions" style="align-self:flex-start">
             ${cancelBtn}
-            <span class="status-badge status-${s.status}">${s.status}</span>
+            <span class="status-badge status-${s.status}">${statusLabel}</span>
         </div>
     </div>`;
 }

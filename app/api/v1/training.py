@@ -1066,17 +1066,23 @@ async def _run_hyperparam_search(search_id: int, app) -> None:
                 await _reload_model_after_training(app, best_trial.model_path)
                 await _generate_embeddings_after_training(app)
 
-        # Mark search as completed
+        # Mark search with appropriate final status
         async with async_session() as db:
             result = await db.execute(
                 select(HyperparamSearch).where(HyperparamSearch.id == search_id)
             )
             search = result.scalar_one()
-            search.status = "completed"
+            if search.completed_trials == 0:
+                search.status = "failed"
+            elif search.failed_trials > 0:
+                search.status = "completed_with_warnings"
+            else:
+                search.status = "completed"
             await db.commit()
 
-        logger.info("Hyperparameter search %d completed: %d/%d trials, best=%.4f",
-                     search_id, search.completed_trials, search.total_trials, best_metric or 0)
+        logger.info("Hyperparameter search %d %s: %d/%d trials (%d failed), best=%.4f",
+                     search_id, search.status, search.completed_trials,
+                     search.total_trials, search.failed_trials, best_metric or 0)
 
     except Exception as e:
         logger.error("Hyperparameter search %d failed: %s", search_id, e)
